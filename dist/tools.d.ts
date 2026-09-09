@@ -9,6 +9,6 @@ export interface RegisterFindToolsOptions {
     mode?: FindMode;
     cwd?: string;
 }
-/** Flag > OMP_FIND_MODE env > omp-find.json > additive. */
+/** Flag > OMP_FIND_MODE env > omp-find.json > override. */
 export declare function resolveFindMode(explicit?: FindMode, cwd?: string): FindMode;
 export declare function registerFindTools(pi: any, deps: FindToolsDeps, opts?: RegisterFindToolsOptions): void;

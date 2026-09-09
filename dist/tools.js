@@ -17,7 +17,7 @@ function storeCursor(s) {
     }
     return id;
 }
-/** Flag > OMP_FIND_MODE env > omp-find.json > additive. */
+/** Flag > OMP_FIND_MODE env > omp-find.json > override. */
 export function resolveFindMode(explicit, cwd = process.cwd()) {
     if (explicit === "additive" || explicit === "override")
         return explicit;
@@ -32,7 +32,7 @@ export function resolveFindMode(explicit, cwd = process.cwd()) {
             return mode;
     }
     catch { /* missing/unparseable → default */ }
-    return "additive";
+    return "override";
 }
 function text(t) {
     return { content: [{ type: "text", text: t }] };
