@@ -183,12 +183,12 @@ describe('grepContents bounds (needs core)', () => {
     if (spawnSync('rg', ['--version'], { stdio: 'ignore' }).status !== 0) return t.skip('rg absent from PATH');
     const root = await mkdtemp(join(tmpdir(), 'omp-find-rgstdin-'));
     try {
-      await writeFile(join(root, 'a.txt'), 'hello function world\nsecond line\n');
+      await writeFile(join(root, 'a.txt'), 'hello function world\r\nsecond line\r\nfunction two here\r\nand function three\r\n');
       const timeoutMs = 8000;
       const start = Date.now();
       const res = await search.grepContents('function', { cwd: root, timeoutMs });
       const elapsed = Date.now() - start;
-      assert.ok(res.total > 0, 'fixture match found');
+      assert.equal(res.total, 3, 'every line match returns (CRLF split drops all but the last pre-fix on Windows)');
       assert.ok(elapsed < timeoutMs, `resolved in ${elapsed}ms, well under ${timeoutMs}ms (pre-fix it ate the whole timeout)`);
       for (const m of res.matches) {
         assert.ok(!m.path.startsWith('./') && !m.path.startsWith('.\\'), `no ./ prefix leaks (got ${m.path})`);

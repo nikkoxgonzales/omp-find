@@ -172,7 +172,7 @@ async function rgGrep(cwd: string, pattern: string, literal: boolean, ignoreCase
   if (ignoreCase) args.push("--ignore-case");
   args.push("--", pattern, ".");
   const out: GrepMatch[] = [];
-  for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split("\n")) {
+  for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split(/\r?\n/)) {
     if (!line) continue;
     const m = /^(.*?):(\d+):(\d+):(.*)$/.exec(line);
     if (m) out.push({ path: toNative(stripDotSlash(m[1].replace(/\\/g, "/"))), line: Number(m[2]), col: Number(m[3]), text: m[4].trim().slice(0, 500) });
