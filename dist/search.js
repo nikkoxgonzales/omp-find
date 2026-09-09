@@ -251,7 +251,7 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs) {
         args.push("--ignore-case");
     args.push("--", pattern, ".");
     const out = [];
-    for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split("\n")) {
+    for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split(/\r?\n/)) {
         if (!line)
             continue;
         const m = /^(.*?):(\d+):(\d+):(.*)$/.exec(line);
