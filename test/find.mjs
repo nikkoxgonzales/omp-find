@@ -213,8 +213,8 @@ describe('grepContents bounds (needs core)', () => {
       await writeFile(join(root, 'other', 'misc.txt'), 'DOTSLASH_MARKER_9q2 lives here too\n');
       const pi = fakePi();
       findTools.registerFindTools(pi, { search, frecency });
-      const tool = pi.tools.get('ffgrep');
-      assert.ok(tool, 'ffgrep registered');
+      const tool = pi.tools.get('grep');
+      assert.ok(tool, 'grep registered under the override default');
       const out = await tool.execute('t1', { pattern: 'DOTSLASH_MARKER_9q2', path: 'src/', cwd: root });
       const textOut = out?.content?.[0]?.text ?? String(out);
       assert.ok(textOut.includes('src/tools.ts'), `dir filter returns the src hit:\n${textOut}`);
@@ -239,11 +239,15 @@ describe('extension + tools wiring (needs core)', () => {
   it('default extension registers commands and tools on a fake pi', async (t) => {
     if (!extension?.default) return t.skip('dist/extension.js missing');
     if (!findTools?.registerFindTools) return t.skip('core tools.ts not landed yet');
+    const oldEnv = process.env.OMP_FIND_MODE;
+    delete process.env.OMP_FIND_MODE;
     const pi = fakePi();
     extension.default(pi);
     await new Promise((r) => setTimeout(r, 50));
+    if (oldEnv === undefined) delete process.env.OMP_FIND_MODE;
+    else process.env.OMP_FIND_MODE = oldEnv;
     assert.ok(pi.commands.has('find-health'), 'commands wired via extension');
-    assert.ok(pi.tools.has('fffind') || pi.tools.size > 0, `tools wired: ${[...pi.tools.keys()]}`);
+    assert.ok(pi.tools.has('find') && pi.tools.has('grep'), `override is the default: tools wired as find/grep: ${[...pi.tools.keys()]}`);
     // Mirror of the real host's required tool fields (host.ts:63-73).
     for (const [key, def] of pi.tools) {
       assert.equal(typeof def.name, 'string', `${key}: name is a string`);
@@ -256,6 +260,24 @@ describe('extension + tools wiring (needs core)', () => {
       assert.equal(typeof def.execute, 'function', `${key}: execute is a function`);
     }
     pi.emit('session-start', {}, {});
+  });
+  it('no-arg resolve is override; explicit flag and env take precedence', async (t) => {
+    if (!findTools?.resolveFindMode) return t.skip('core tools.ts not landed yet');
+    const oldEnv = process.env.OMP_FIND_MODE;
+    const root = await mkdtemp(join(tmpdir(), 'omp-find-mode-'));
+    try {
+      delete process.env.OMP_FIND_MODE;
+      assert.equal(findTools.resolveFindMode(undefined, root), 'override', 'built-in default is override');
+      assert.equal(findTools.resolveFindMode('additive', root), 'additive', 'explicit flag wins');
+      process.env.OMP_FIND_MODE = 'additive';
+      assert.equal(findTools.resolveFindMode(undefined, root), 'additive', 'env beats the default');
+      process.env.OMP_FIND_MODE = 'override';
+      assert.equal(findTools.resolveFindMode('additive', root), 'additive', 'explicit flag beats env');
+    } finally {
+      if (oldEnv === undefined) delete process.env.OMP_FIND_MODE;
+      else process.env.OMP_FIND_MODE = oldEnv;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('extension never throws on a minimal host without .on', async (t) => {

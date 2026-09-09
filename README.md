@@ -13,7 +13,7 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 - **Query subset** — `dir/` prefix, `*.ext`-style globs, `!` exclusions, `git:modified`; leftover words fuzzy-match the path.
 - **Per-project JSON frecency** — every opened file bumps count + recency (7-day half-life decay); frequent/recent paths sort first. Stored under `%LOCALAPPDATA%/omp-find` (Windows) or `~/.omp/var/omp-find`, keyed by project-root hash.
 - **Cursor pagination** — default 30 results per page, max 50; fuller pages return an opaque `cursor` for the next page.
-- **Additive vs override** — additive (default) registers `fffind`/`ffgrep` alongside the host's tools; override replaces them as `find`/`grep`.
+- **Override vs additive** — override (default) registers `find`/`grep`, replacing the host's tools; additive keeps `fffind`/`ffgrep` alongside them.
 - **No persistent index** — `/find-rescan` just drops the frecency store; the next search rebuilds from disk. Runaway-tree guard refuses filesystem-root and home-directory scans.
 
 ## What an agent actually sees
@@ -88,10 +88,10 @@ Mode precedence, highest first:
 1. Explicit flag passed to tool registration
 2. `OMP_FIND_MODE` env var (`additive` or `override`)
 3. `"mode"` in `omp-find.json` at the project root
-4. Built-in default: `additive` (all sources on)
+4. Built-in default: `override` (host tools replaced)
 
 ```json
-{ "mode": "override" }
+{ "mode": "additive" }
 ```
 
 Scanning needs no config: `rg --files` / `rg --vimgrep` when `rg` is on `PATH`, otherwise the builtin walker (symlinks not followed by default). Frecency location follows the store path above; deleting it is safe.
