@@ -92,7 +92,7 @@ async function walkFiles(cwd: string, follow: boolean): Promise<string[]> {
 async function listFiles(cwd: string, scan: string | undefined, follow: boolean): Promise<string[]> {
   if (scan !== "mock") {
     try {
-      const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow"], cwd);
+      const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow", "."], cwd);
       return stdout.split("\n").map((l) => l.trim().replace(/\\/g, "/")).filter(Boolean);
     } catch (err) { if (errCode(err) !== "ENOENT") throw err; }
   }
@@ -168,7 +168,7 @@ async function rgGrep(cwd: string, pattern: string, literal: boolean, ignoreCase
   const args = ["--vimgrep", "--no-heading", "--no-messages", "--max-columns", "500", "--max-filesize", MAX_GREP_SIZE, follow ? "--follow" : "--no-follow"];
   if (literal) args.push("--fixed-strings");
   if (ignoreCase) args.push("--ignore-case");
-  args.push("--", pattern);
+  args.push("--", pattern, ".");
   const out: GrepMatch[] = [];
   for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split("\n")) {
     if (!line) continue;

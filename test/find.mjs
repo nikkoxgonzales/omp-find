@@ -168,13 +168,30 @@ describe('grepContents bounds (needs core)', () => {
         await writeFile(join(root, 'a.txt'), 'nothing to see here\n');
         const fifo = join(root, 'stall');
         try { execFileSync('mkfifo', [fifo]); } catch { return t.skip('mkfifo unavailable'); }
-        const pending = search.grepContents('nothing', { cwd: root, scan: 'mock', timeoutMs: 50 });
+        const pending = search.grepContents('nothing', { cwd: root, timeoutMs: 1500 });
         await assert.rejects(() => pending, /timed out/, 'slow scan rejects as timed out');
         await writeFile(fifo, 'drain the orphaned reader\n');
         await pending.catch(() => {});
       } finally {
         await rm(root, { recursive: true, force: true });
       }
+    }
+  });
+  it('real rg resolves well under timeout (never blocks on stdin)', async (t) => {
+    if (!search?.grepContents) return t.skip('core search.ts not landed yet');
+    const { spawnSync } = await import('node:child_process');
+    if (spawnSync('rg', ['--version'], { stdio: 'ignore' }).status !== 0) return t.skip('rg absent from PATH');
+    const root = await mkdtemp(join(tmpdir(), 'omp-find-rgstdin-'));
+    try {
+      await writeFile(join(root, 'a.txt'), 'hello function world\nsecond line\n');
+      const timeoutMs = 8000;
+      const start = Date.now();
+      const res = await search.grepContents('function', { cwd: root, timeoutMs });
+      const elapsed = Date.now() - start;
+      assert.ok(res.total > 0, 'fixture match found');
+      assert.ok(elapsed < timeoutMs, `resolved in ${elapsed}ms, well under ${timeoutMs}ms (pre-fix it ate the whole timeout)`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });
