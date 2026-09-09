@@ -1,8 +1,8 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, copyFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const dist = (p) => pathToFileURL(join(process.cwd(), 'dist', p)).href;
@@ -111,6 +111,70 @@ describe('parseFindQuery constraint subset (needs core)', () => {
       assert.ok(!names.some((n) => n.endsWith('note.md')), `ext filter honored: ${names}`);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('grepContents bounds (needs core)', () => {
+  it('skips oversized files in the fallback scan but still matches small ones', async (t) => {
+    if (!search?.grepContents) return t.skip('core search.ts not landed yet');
+    const root = await mkdtemp(join(tmpdir(), 'omp-find-grep-'));
+    try {
+      await writeFile(join(root, 'small.txt'), 'the needle is here\n');
+      const big = Buffer.alloc(2 * 1024 * 1024 + 64, 'x');
+      big.write('needle-BIGMARKER-UNIQUE-7f3a', 0);
+      await writeFile(join(root, 'big.txt'), big);
+      const skipped = await search.grepContents('needle-BIGMARKER-UNIQUE-7f3a', { cwd: root, scan: 'mock' });
+      assert.equal(skipped.total, 0, 'oversized file is never matched');
+      assert.deepEqual(skipped.matches, []);
+      const hit = await search.grepContents('needle', { cwd: root, scan: 'mock' });
+      assert.ok(hit.total > 0, 'small file still matched');
+      assert.ok(hit.matches.every((m) => !String(m.path).endsWith('big.txt')), 'no hits leak from big.txt');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces a slow scan as a timed-out rejection via timeoutMs', async (t) => {
+    if (!search?.grepContents) return t.skip('core search.ts not landed yet');
+    // Slow-scan stub: must block past a 50ms budget and die when killed, so the
+    // orphaned loser of the timeout race never holds the test process open.
+    if (process.platform === 'win32') {
+      // cmd.exe ignores rg-style args and sits interactive on piped stdin (blocks).
+      const root = await mkdtemp(join(tmpdir(), 'omp-find-timeout-'));
+      const bin = join(root, 'bin');
+      await mkdir(bin, { recursive: true });
+      await writeFile(join(root, 'a.txt'), 'nothing to see here\n');
+      const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+      await copyFile(join(systemRoot, 'System32', 'cmd.exe'), join(bin, 'rg.exe'));
+      const oldPath = process.env.PATH;
+      process.env.PATH = bin + delimiter + oldPath;
+      try {
+        await assert.rejects(
+          search.grepContents('nothing', { cwd: root, timeoutMs: 50 }),
+          /timed out/,
+          'slow scan rejects with a timed-out error (tool layer renders it as text)',
+        );
+      } finally {
+        process.env.PATH = oldPath;
+        await rm(root, { recursive: true, force: true });
+      }
+    } else {
+      // POSIX: a fifo with no writer blocks the fallback reader; we open the
+      // writer only after the race rejects, so the orphaned scan drains cleanly.
+      const { execFileSync } = await import('node:child_process');
+      const root = await mkdtemp(join(tmpdir(), 'omp-find-timeout-'));
+      try {
+        await writeFile(join(root, 'a.txt'), 'nothing to see here\n');
+        const fifo = join(root, 'stall');
+        try { execFileSync('mkfifo', [fifo]); } catch { return t.skip('mkfifo unavailable'); }
+        const pending = search.grepContents('nothing', { cwd: root, scan: 'mock', timeoutMs: 50 });
+        await assert.rejects(() => pending, /timed out/, 'slow scan rejects as timed out');
+        await writeFile(fifo, 'drain the orphaned reader\n');
+        await pending.catch(() => {});
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     }
   });
 });

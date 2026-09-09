@@ -4,9 +4,13 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 export const PAGE_DEFAULT = 30, PAGE_MAX = 50;
 const RG_BUFFER = 64 * 1024 * 1024, GREP_CAP = 20000, MAX_DEPTH = 25;
+/** Per-file ceiling for content scans (fallback stat skip + rg --max-filesize); oversized files never match. */
+const MAX_GREP_BYTES = 2 * 1024 * 1024, MAX_GREP_SIZE = "2M";
+/** Default wall-clock budget for one grep call (overridable via GrepOptions.timeoutMs). */
+const GREP_TIMEOUT_DEFAULT = 30000;
 export interface ParsedFindQuery { fuzzy: string; dirPrefix?: string; extGlobs: string[]; excludes: string[]; gitModifiedOnly: boolean }
 export interface FindOptions { cwd?: string; limit?: number; offset?: number; scan?: string; followSymlinks?: boolean }
-export interface GrepOptions { cwd?: string; limit?: number; offset?: number; literal?: boolean; ignoreCase?: boolean; scan?: string; followSymlinks?: boolean }
+export interface GrepOptions { cwd?: string; limit?: number; offset?: number; literal?: boolean; ignoreCase?: boolean; scan?: string; followSymlinks?: boolean; timeoutMs?: number }
 export interface GrepMatch { path: string; line: number; col: number; text: string }
 export interface GrepResult { matches: GrepMatch[]; total: number }
 /** Split a raw query into dir prefix, globs, exclusions, and fuzzy text. */
@@ -41,10 +45,15 @@ export function globToRegExp(glob: string): RegExp {
 function errCode(err: unknown): unknown {
   return err !== null && typeof err === "object" && "code" in err ? err.code : undefined;
 }
-function runCmd(cmd: string, args: string[], cwd: string): Promise<string> {
+/** execFile wrapper: rg exit 1 (no matches) resolves; overruns reject as `timed out` (child is killed). */
+function runCmd(cmd: string, args: string[], cwd: string, timeoutMs: number = GREP_TIMEOUT_DEFAULT): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { cwd, maxBuffer: RG_BUFFER }, (err, stdout) => {
-      if (err && !(cmd === "rg" && errCode(err) === 1)) reject(err); else resolve(stdout ?? ""); // rg exit 1 = no matches
+    execFile(cmd, args, { cwd, maxBuffer: RG_BUFFER, timeout: timeoutMs }, (err, stdout) => {
+      if (err) {
+        const killed = err !== null && typeof err === "object" && "killed" in err && err.killed === true;
+        if (killed) { reject(new Error(`${cmd} timed out after ${timeoutMs / 1000}s`)); return; }
+        if (!(cmd === "rg" && errCode(err) === 1)) reject(err); else resolve(stdout ?? ""); // rg exit 1 = no matches
+      } else resolve(stdout ?? "");
     });
   });
 }
@@ -155,13 +164,13 @@ export async function findPaths(query: string, opts: FindOptions = {}): Promise<
   scored.sort((a, b) => a.s - b.s || a.p.length - b.p.length || (a.p < b.p ? -1 : 1));
   return pageOf(scored, opts.limit, opts.offset).map((e) => toNative(e.p));
 }
-async function rgGrep(cwd: string, pattern: string, literal: boolean, ignoreCase: boolean, follow: boolean): Promise<GrepMatch[]> {
-  const args = ["--vimgrep", "--no-heading", "--no-messages", "--max-columns", "500", follow ? "--follow" : "--no-follow"];
+async function rgGrep(cwd: string, pattern: string, literal: boolean, ignoreCase: boolean, follow: boolean, timeoutMs: number): Promise<GrepMatch[]> {
+  const args = ["--vimgrep", "--no-heading", "--no-messages", "--max-columns", "500", "--max-filesize", MAX_GREP_SIZE, follow ? "--follow" : "--no-follow"];
   if (literal) args.push("--fixed-strings");
   if (ignoreCase) args.push("--ignore-case");
   args.push("--", pattern);
   const out: GrepMatch[] = [];
-  for (const line of (await runCmd("rg", args, cwd)).split("\n")) {
+  for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split("\n")) {
     if (!line) continue;
     const m = /^(.*?):(\d+):(\d+):(.*)$/.exec(line);
     if (m) out.push({ path: toNative(m[1].replace(/\\/g, "/")), line: Number(m[2]), col: Number(m[3]), text: m[4].trim().slice(0, 500) });
@@ -178,6 +187,7 @@ async function fallbackGrep(cwd: string, pattern: string, literal: boolean, igno
   for (const f of await walkFiles(cwd, follow)) {
     let text: string;
     try {
+      if ((await fs.stat(path.join(cwd, f))).size > MAX_GREP_BYTES) continue; // oversized skip
       const buf = await fs.readFile(path.join(cwd, f));
       if (buf.indexOf(0) >= 0) continue; // binary skip
       text = buf.toString("utf8");
@@ -208,16 +218,28 @@ export async function grepContents(pattern: string, opts: GrepOptions = {}): Pro
   const literal = opts.literal ?? true;
   if (!literal) { try { new RegExp(pattern); } catch { throw new Error(`invalid regex: ${pattern}`); } }
   const follow = opts.followSymlinks ?? false, ignoreCase = opts.ignoreCase ?? false;
-  let matches: GrepMatch[];
-  if (opts.scan === "mock") matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow);
-  else {
-    try { matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow); }
-    catch (err) {
-      if (errCode(err) !== "ENOENT") throw err;
-      matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow);
+  const timeoutMs = opts.timeoutMs ?? GREP_TIMEOUT_DEFAULT;
+  const run = (async (): Promise<GrepResult> => {
+    let matches: GrepMatch[];
+    if (opts.scan === "mock") matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow);
+    else {
+      try { matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs); }
+      catch (err) {
+        if (errCode(err) !== "ENOENT") throw err;
+        matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow);
+      }
     }
+    return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length };
+  })();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const overdue = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`grep timed out after ${timeoutMs / 1000}s`)), timeoutMs);
+    });
+    return await Promise.race([run, overdue]);
+  } finally {
+    clearTimeout(timer);
   }
-  return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length };
 }
 /** Best-effort warm scan (no watcher/index — primes the OS cache). Never throws. */
 export async function warmScan(): Promise<void> {
