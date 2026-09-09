@@ -16,6 +16,48 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 - **Additive vs override** — additive (default) registers `fffind`/`ffgrep` alongside the host's tools; override replaces them as `find`/`grep`.
 - **No persistent index** — `/find-rescan` just drops the frecency store; the next search rebuilds from disk. Runaway-tree guard refuses filesystem-root and home-directory scans.
 
+## What an agent actually sees
+
+Unlike omp-peers, there is no injected per-prompt note — the agent sees two tool cards and two commands, nothing else.
+
+```text
+fffind ("Find files"; `find` in override mode)
+  "Fuzzy file-name search (omp-find). Supports dir/ prefix, *.ext globs, !exclusions, git:modified."
+  pattern: "Fuzzy query, e.g. 'main.ts src/ !*.test.ts'"
+  path: "Directory constraint, e.g. 'src/'"
+  limit: "Max results per page (default 30, max 50)"
+  cursor: "Opaque pagination cursor from a previous call"
+ffgrep ("Grep content"; `grep` in override mode)
+  "Content search (omp-find). Literal by default, regex when literal=false."
+  pattern (required): "Search text or regex"
+  path: "File constraint, e.g. 'src/', '*.ts'"
+  literal: "Literal match (default true)"
+  ignoreCase: "Case-insensitive match"
+  limit: "Max matches per page (default 30, max 50)"
+  cursor: "Opaque pagination cursor from a previous call"
+Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." (no pattern, unknown/expired cursor).
+```
+
+```text
+> fffind { "pattern": "srv usr" }   # paths illustrative
+src/user.ts
+src/user_service.ts
+
+... (2 more; pass cursor "c1" for the next page)
+
+> ffgrep { "pattern": "frecency", "path": "src/" }   # paths illustrative
+src/frecency.ts:12:3: const HALF_LIFE_MS = ...
+src/tools.ts:136:9: const ranked = ...
+
+> /find-health
+find status
+index: ok (no status reported)
+frecency: ok (no status reported)
+
+> /find-rescan
+caches dropped (nothing cached)
+```
+
 ## Query syntax
 
 | Token | Meaning | Example |
