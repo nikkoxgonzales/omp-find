@@ -247,7 +247,7 @@ describe('extension + tools wiring (needs core)', () => {
     if (oldEnv === undefined) delete process.env.OMP_FIND_MODE;
     else process.env.OMP_FIND_MODE = oldEnv;
     assert.ok(pi.commands.has('find-health'), 'commands wired via extension');
-    assert.ok(pi.tools.has('find') && pi.tools.has('grep'), `override is the default: tools wired as find/grep: ${[...pi.tools.keys()]}`);
+    assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep', 'find', 'grep'], `override default wires all four: ${[...pi.tools.keys()]}`);
     // Mirror of the real host's required tool fields (host.ts:63-73).
     for (const [key, def] of pi.tools) {
       assert.equal(typeof def.name, 'string', `${key}: name is a string`);
@@ -276,6 +276,34 @@ describe('extension + tools wiring (needs core)', () => {
     } finally {
       if (oldEnv === undefined) delete process.env.OMP_FIND_MODE;
       else process.env.OMP_FIND_MODE = oldEnv;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('additive registers exactly fffind+ffgrep', async (t) => {
+    if (!findTools?.registerFindTools || !search?.findPaths) return t.skip('core not landed yet');
+    const pi = fakePi();
+    findTools.registerFindTools(pi, { search, frecency }, { mode: 'additive' });
+    assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep'], 'additive leaves host names alone');
+  });
+
+  it('override aliases execute identically to canonical names', async (t) => {
+    if (!findTools?.registerFindTools || !search?.findPaths || !search?.grepContents) return t.skip('core not landed yet');
+    const root = await mkdtemp(join(tmpdir(), 'omp-find-alias-'));
+    try {
+      await writeFile(join(root, 'alpha.txt'), 'shared marker one\n');
+      await writeFile(join(root, 'beta.txt'), 'shared marker two\n');
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency }, { mode: 'override', cwd: root });
+      const byName = (n) => pi.tools.get(n);
+      assert.ok(byName('find') && byName('fffind') && byName('grep') && byName('ffgrep'), 'all four registered in override');
+      const norm = (s) => s.split('\n').sort().join('\n');
+      const findA = norm((await byName('find').execute('q1', { pattern: 'alpha', cwd: root })).content[0].text);
+      const findB = norm((await byName('fffind').execute('q2', { pattern: 'alpha', cwd: root })).content[0].text);
+      assert.equal(findA, findB, 'same find query returns the same page under both names');
+      const grepA = norm((await byName('grep').execute('q3', { pattern: 'shared marker', cwd: root })).content[0].text);
+      const grepB = norm((await byName('ffgrep').execute('q4', { pattern: 'shared marker', cwd: root })).content[0].text);
+      assert.equal(grepA, grepB, 'same grep query returns the same page under both names');
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });

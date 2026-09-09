@@ -13,7 +13,7 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 - **Query subset** — `dir/` prefix, `*.ext`-style globs, `!` exclusions, `git:modified`; leftover words fuzzy-match the path.
 - **Per-project JSON frecency** — every opened file bumps count + recency (7-day half-life decay); frequent/recent paths sort first. Stored under `%LOCALAPPDATA%/omp-find` (Windows) or `~/.omp/var/omp-find`, keyed by project-root hash.
 - **Cursor pagination** — default 30 results per page, max 50; fuller pages return an opaque `cursor` for the next page.
-- **Override vs additive** — override (default) registers `find`/`grep`, replacing the host's tools; additive keeps `fffind`/`ffgrep` alongside them.
+- **Override vs additive** — `fffind` / `ffgrep` are always registered; override (default) additionally claims `find` / `grep`, additive leaves the host's names alone.
 - **No persistent index** — `/find-rescan` just drops the frecency store; the next search rebuilds from disk. Runaway-tree guard refuses filesystem-root and home-directory scans.
 
 ## What an agent actually sees
@@ -79,7 +79,7 @@ caches dropped (nothing cached)
 | `/find-health` | Shows scan backend status plus frecency status. |
 | `/find-rescan` | Drops the frecency store (nothing else is cached). |
 
-In override mode the tools are named `find` / `grep` with the same parameters.
+`fffind` / `ffgrep` are always present; override mode additionally claims `find` / `grep` (same handlers, where the host allows).
 
 ## Config
 

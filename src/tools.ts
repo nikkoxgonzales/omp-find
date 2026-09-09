@@ -1,4 +1,4 @@
-/** omp-find tool surface: `fffind` + `ffgrep` (or `find` + `grep` in override mode). */
+/** omp-find tool surface: `fffind` + `ffgrep` always; override mode additionally claims `find` + `grep`. */
 import fs from "node:fs";
 import path from "node:path";
 import type * as SearchNS from "./search.js";
@@ -93,8 +93,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
   const frecency = deps.frecency;
   if (!search?.findPaths || !search?.grepContents) return;
   const mode = resolveFindMode(opts.mode, opts.cwd ?? process.cwd());
-  const findName = mode === "override" ? "find" : "fffind";
-  const grepName = mode === "override" ? "grep" : "ffgrep";
+  const isOverride = mode === "override";
   // Canonical form is the single ExtensionHostLike object {name, label, ...};
   // the scaffold test fake takes (name, def) but asserts name/label live on
   // the def, so both arities receive the full object.
@@ -104,7 +103,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
     else pi.registerTool(tool);
   };
 
-  register(findName, "Find files", {
+  const findDef = (toolName: string): Record<string, unknown> => ({
     description: "Fuzzy file-name search (omp-find). Supports dir/ prefix, *.ext globs, !exclusions, git:modified.",
     parameters: {
       type: "object",
@@ -122,12 +121,12 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const cursorId = strParam(params, "cursor");
         if (cursorId) {
           const st = cursors.get(cursorId);
-          if (!st || st.kind !== "find") return text(`${findName} failed: unknown or expired cursor "${cursorId}"`);
+          if (!st || st.kind !== "find") return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
           query = st.query; limit = st.limit; offset = st.nextOffset; cwd = st.cwd;
         } else {
           const pattern = strParam(params, "pattern") ?? "";
           query = [strParam(params, "path"), pattern].filter(Boolean).join(" ");
-          if (!query) return text(`${findName} failed: provide a pattern or path`);
+          if (!query) return text(`${toolName} failed: provide a pattern or path`);
           limit = numParam(params, "limit") ?? FIND_PAGE;
           offset = 0;
           cwd = strParam(params, "cwd");
@@ -144,12 +143,12 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         }
         return text(lines.length > 0 ? lines.join("\n") : "No files found matching pattern");
       } catch (err) {
-        return text(`${findName} failed: ${errMsg(err)}`);
+        return text(`${toolName} failed: ${errMsg(err)}`);
       }
     },
   });
 
-  register(grepName, "Grep content", {
+  const grepDef = (toolName: string): Record<string, unknown> => ({
     description: "Content search (omp-find). Literal by default, regex when literal=false.",
     parameters: {
       type: "object",
@@ -171,12 +170,12 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const cursorId = strParam(params, "cursor");
         if (cursorId) {
           const st = cursors.get(cursorId);
-          if (!st || st.kind !== "grep") return text(`${grepName} failed: unknown or expired cursor "${cursorId}"`);
+          if (!st || st.kind !== "grep") return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
           pattern = st.pattern; literal = st.literal; ignoreCase = st.ignoreCase;
           pathFilter = st.pathFilter; limit = st.limit; offset = st.nextOffset; cwd = st.cwd;
         } else {
           const p = strParam(params, "pattern");
-          if (!p) return text(`${grepName} failed: provide a pattern`);
+          if (!p) return text(`${toolName} failed: provide a pattern`);
           pattern = p;
           literal = params["literal"] === undefined ? true : params["literal"] === true;
           ignoreCase = params["ignoreCase"] === true;
@@ -203,8 +202,14 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         }
         return text(lines.length > 0 ? lines.join("\n") : "No matches found");
       } catch (err) {
-        return text(`${grepName} failed: ${errMsg(err)}`);
+        return text(`${toolName} failed: ${errMsg(err)}`);
       }
     },
   });
+  register("fffind", "Find files", findDef("fffind"));
+  register("ffgrep", "Grep content", grepDef("ffgrep"));
+  if (isOverride) {
+    register("find", "Find files", findDef("find"));
+    register("grep", "Grep content", grepDef("grep"));
+  }
 }
