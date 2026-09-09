@@ -1,0 +1,14 @@
+# Local-only
+.claude/
+CLAUDE.md
+.temp/
+.env*
+package-lock.json
+
+# Deps only — dist/ is committed on purpose: plugin installs must load
+# without a build step (bun does not run dependency postinstall scripts).
+node_modules/
+
+# OS / editor noise
+Thumbs.db
+Desktop.ini

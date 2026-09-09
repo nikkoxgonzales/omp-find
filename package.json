@@ -1,0 +1,56 @@
+{
+  "name": "omp-find",
+  "version": "0.1.0",
+  "description": "A lighter omp-focused replacement for fff: fast file finding (fffind) and content grep (ffgrep) for Oh My Pi (omp) and pi — no watcher, no LMDB, no picker UI.",
+  "type": "module",
+  "main": "./dist/extension.js",
+  "types": "./dist/extension.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/extension.d.ts",
+      "import": "./dist/extension.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/find.mjs"
+  },
+  "omp": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
+  "keywords": [
+    "oh-my-pi",
+    "pi-coding-agent",
+    "find",
+    "grep",
+    "file-search",
+    "frecency"
+  ],
+  "author": "Nikko Gonzales <nikkoxgonzales@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikkoxgonzales/omp-find.git"
+  },
+  "homepage": "https://github.com/nikkoxgonzales/omp-find#readme",
+  "bugs": {
+    "url": "https://github.com/nikkoxgonzales/omp-find/issues"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.5.0",
+    "typescript": "^7.0.2"
+  }
+}
