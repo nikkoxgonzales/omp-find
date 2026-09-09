@@ -141,7 +141,7 @@ async function walkFiles(cwd, follow) {
 async function listFiles(cwd, scan, follow) {
     if (scan !== "mock") {
         try {
-            const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow"], cwd);
+            const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow", "."], cwd);
             return stdout.split("\n").map((l) => l.trim().replace(/\\/g, "/")).filter(Boolean);
         }
         catch (err) {
@@ -247,7 +247,7 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs) {
         args.push("--fixed-strings");
     if (ignoreCase)
         args.push("--ignore-case");
-    args.push("--", pattern);
+    args.push("--", pattern, ".");
     const out = [];
     for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split("\n")) {
         if (!line)
