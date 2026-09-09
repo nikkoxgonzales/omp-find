@@ -21,6 +21,7 @@ export interface GrepOptions {
     ignoreCase?: boolean;
     scan?: string;
     followSymlinks?: boolean;
+    timeoutMs?: number;
 }
 export interface GrepMatch {
     path: string;
