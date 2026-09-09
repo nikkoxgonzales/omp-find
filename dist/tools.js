@@ -1,4 +1,4 @@
-/** omp-find tool surface: `fffind` + `ffgrep` (or `find` + `grep` in override mode). */
+/** omp-find tool surface: `fffind` + `ffgrep` always; override mode additionally claims `find` + `grep`. */
 import fs from "node:fs";
 import path from "node:path";
 const FIND_PAGE = 30;
@@ -81,8 +81,7 @@ export function registerFindTools(pi, deps, opts = {}) {
     if (!search?.findPaths || !search?.grepContents)
         return;
     const mode = resolveFindMode(opts.mode, opts.cwd ?? process.cwd());
-    const findName = mode === "override" ? "find" : "fffind";
-    const grepName = mode === "override" ? "grep" : "ffgrep";
+    const isOverride = mode === "override";
     // Canonical form is the single ExtensionHostLike object {name, label, ...};
     // the scaffold test fake takes (name, def) but asserts name/label live on
     // the def, so both arities receive the full object.
@@ -93,7 +92,7 @@ export function registerFindTools(pi, deps, opts = {}) {
         else
             pi.registerTool(tool);
     };
-    register(findName, "Find files", {
+    const findDef = (toolName) => ({
         description: "Fuzzy file-name search (omp-find). Supports dir/ prefix, *.ext globs, !exclusions, git:modified.",
         parameters: {
             type: "object",
@@ -112,7 +111,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 if (cursorId) {
                     const st = cursors.get(cursorId);
                     if (!st || st.kind !== "find")
-                        return text(`${findName} failed: unknown or expired cursor "${cursorId}"`);
+                        return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
                     query = st.query;
                     limit = st.limit;
                     offset = st.nextOffset;
@@ -122,7 +121,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     const pattern = strParam(params, "pattern") ?? "";
                     query = [strParam(params, "path"), pattern].filter(Boolean).join(" ");
                     if (!query)
-                        return text(`${findName} failed: provide a pattern or path`);
+                        return text(`${toolName} failed: provide a pattern or path`);
                     limit = numParam(params, "limit") ?? FIND_PAGE;
                     offset = 0;
                     cwd = strParam(params, "cwd");
@@ -140,11 +139,11 @@ export function registerFindTools(pi, deps, opts = {}) {
                 return text(lines.length > 0 ? lines.join("\n") : "No files found matching pattern");
             }
             catch (err) {
-                return text(`${findName} failed: ${errMsg(err)}`);
+                return text(`${toolName} failed: ${errMsg(err)}`);
             }
         },
     });
-    register(grepName, "Grep content", {
+    const grepDef = (toolName) => ({
         description: "Content search (omp-find). Literal by default, regex when literal=false.",
         parameters: {
             type: "object",
@@ -167,7 +166,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 if (cursorId) {
                     const st = cursors.get(cursorId);
                     if (!st || st.kind !== "grep")
-                        return text(`${grepName} failed: unknown or expired cursor "${cursorId}"`);
+                        return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
                     pattern = st.pattern;
                     literal = st.literal;
                     ignoreCase = st.ignoreCase;
@@ -179,7 +178,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 else {
                     const p = strParam(params, "pattern");
                     if (!p)
-                        return text(`${grepName} failed: provide a pattern`);
+                        return text(`${toolName} failed: provide a pattern`);
                     pattern = p;
                     literal = params["literal"] === undefined ? true : params["literal"] === true;
                     ignoreCase = params["ignoreCase"] === true;
@@ -207,8 +206,14 @@ export function registerFindTools(pi, deps, opts = {}) {
                 return text(lines.length > 0 ? lines.join("\n") : "No matches found");
             }
             catch (err) {
-                return text(`${grepName} failed: ${errMsg(err)}`);
+                return text(`${toolName} failed: ${errMsg(err)}`);
             }
         },
     });
+    register("fffind", "Find files", findDef("fffind"));
+    register("ffgrep", "Grep content", grepDef("ffgrep"));
+    if (isOverride) {
+        register("find", "Find files", findDef("find"));
+        register("grep", "Grep content", grepDef("grep"));
+    }
 }
