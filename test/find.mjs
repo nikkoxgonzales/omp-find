@@ -190,6 +190,35 @@ describe('grepContents bounds (needs core)', () => {
       const elapsed = Date.now() - start;
       assert.ok(res.total > 0, 'fixture match found');
       assert.ok(elapsed < timeoutMs, `resolved in ${elapsed}ms, well under ${timeoutMs}ms (pre-fix it ate the whole timeout)`);
+      for (const m of res.matches) {
+        assert.ok(!m.path.startsWith('./') && !m.path.startsWith('.\\'), `no ./ prefix leaks (got ${m.path})`);
+      }
+      for (const p of await search.findPaths('', { cwd: root })) {
+        assert.ok(!p.startsWith('./') && !p.startsWith('.\\'), `no ./ prefix in find results (got ${p})`);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('ffgrep with a dir filter finds hits (no ./ prefix breaks the tools filter)', async (t) => {
+    if (!search?.grepContents || !findTools?.registerFindTools) return t.skip('core not landed yet');
+    const { spawnSync } = await import('node:child_process');
+    if (spawnSync('rg', ['--version'], { stdio: 'ignore' }).status !== 0) return t.skip('rg absent from PATH');
+    const root = await mkdtemp(join(tmpdir(), 'omp-find-dotslash-'));
+    try {
+      await mkdir(join(root, 'src'), { recursive: true });
+      await mkdir(join(root, 'other'), { recursive: true });
+      await writeFile(join(root, 'src', 'tools.ts'), 'export const DOTSLASH_MARKER_9q2 = 1;\n');
+      await writeFile(join(root, 'other', 'misc.txt'), 'DOTSLASH_MARKER_9q2 lives here too\n');
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency });
+      const tool = pi.tools.get('ffgrep');
+      assert.ok(tool, 'ffgrep registered');
+      const out = await tool.execute('t1', { pattern: 'DOTSLASH_MARKER_9q2', path: 'src/', cwd: root });
+      const textOut = out?.content?.[0]?.text ?? String(out);
+      assert.ok(textOut.includes('src/tools.ts'), `dir filter returns the src hit:\n${textOut}`);
+      assert.ok(!textOut.includes('No matches found'), 'filter does not wipe the hits');
     } finally {
       await rm(root, { recursive: true, force: true });
     }

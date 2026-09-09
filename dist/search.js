@@ -142,7 +142,7 @@ async function listFiles(cwd, scan, follow) {
     if (scan !== "mock") {
         try {
             const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow", "."], cwd);
-            return stdout.split("\n").map((l) => l.trim().replace(/\\/g, "/")).filter(Boolean);
+            return stdout.split("\n").map((l) => stripDotSlash(l.trim().replace(/\\/g, "/"))).filter(Boolean);
         }
         catch (err) {
             if (errCode(err) !== "ENOENT")
@@ -220,6 +220,8 @@ function fuzzyScore(pattern, target) {
     return bi >= p.length ? score - 20 : score;
 }
 const toNative = (p) => p.split("/").join(path.sep);
+/** rg via execFile (piped stdout) prefixes relative paths with `./`; terminals strip it, so clean it here. */
+const stripDotSlash = (p) => p.startsWith("./") ? p.slice(2) : p;
 /** Ranked file paths (workspace-relative, native separators), paged by limit/offset. */
 export async function findPaths(query, opts = {}) {
     const cwd = path.resolve(opts.cwd ?? process.cwd());
@@ -254,7 +256,7 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs) {
             continue;
         const m = /^(.*?):(\d+):(\d+):(.*)$/.exec(line);
         if (m)
-            out.push({ path: toNative(m[1].replace(/\\/g, "/")), line: Number(m[2]), col: Number(m[3]), text: m[4].trim().slice(0, 500) });
+            out.push({ path: toNative(stripDotSlash(m[1].replace(/\\/g, "/"))), line: Number(m[2]), col: Number(m[3]), text: m[4].trim().slice(0, 500) });
     }
     return out;
 }
