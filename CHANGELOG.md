@@ -3,6 +3,23 @@
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
 
+## [0.5.0]
+
+### Added
+
+- `ffstructural` (+ `structural` alias): approximate structural search — ast-grep-style `$VAR`/`$$$` patterns, `kind:`/`symbol:`/`references:`/`inside:`/`has:` lower to one ranked regex call; `rewrite` returns a preview diff and never writes.
+- `details` envelope on every execute: `{ totalMatched, totalFiles, truncated }` over the full result set (pi-fff packaging; hosts that ignore it see identical text).
+- One-line `promptSnippet` per tool card (guidelines unchanged).
+- Limit-reached notices (`"<limit> matches limit reached. Use limit=<2×limit>"`) next to cursor footers.
+- Snapshot-bound cursors: each stored cursor binds result `total` + backend; resuming after the tree changes returns restart guidance (`results changed since page 1; re-run without cursor`), never a silently shifted page (gograph query contracts).
+- Certainty labels on `ffcallers`: import/call-paren rows exact, member mentions `[possible]`-tagged, plus an `exact_only` param; zero-exact sets prepend narrowing guidance.
+- `docs/goldmine.md`: ranked steal list behind the 0.5.0 set.
+
+### Changed
+
+- Cursor footers share one returned-vs-total shape across all five tools.
+- README + `docs/extension.md` mirror the new envelope, notices, labels, and cursor binding.
+
 ## [0.4.0]
 
 ### Added

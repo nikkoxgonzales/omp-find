@@ -480,3 +480,6 @@ export async function clearCache() { }
 /** ffoutline core lives in outline.ts; re-exported here so the tool layer's
 `search` dep carries it without extra host wiring. */
 export { outlineFile } from "./outline.js";
+/** ffstructural core lives in structural.ts; re-exported here so the tool layer's
+`search` dep carries it without extra host wiring (same shape as outlineFile). */
+export { compileStructural, structuralGrep, previewRewrite, normalizeLanguage } from "./structural.js";

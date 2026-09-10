@@ -266,7 +266,7 @@ describe('extension + tools wiring (needs core)', () => {
     if (oldEnv === undefined) delete process.env.OMP_FIND_MODE;
     else process.env.OMP_FIND_MODE = oldEnv;
     assert.ok(pi.commands.has('find-health'), 'commands wired via extension');
-    assert.deepEqual([...pi.tools.keys()].sort(), ['ffcallers', 'fffind', 'ffgrep', 'ffoutline', 'find', 'grep', 'outline'], `override default wires all seven: ${[...pi.tools.keys()]}`);
+    assert.deepEqual([...pi.tools.keys()].sort(), ['ffcallers', 'fffind', 'ffgrep', 'ffoutline', 'ffstructural', 'find', 'grep', 'outline', 'structural'], `override default wires all nine: ${[...pi.tools.keys()]}`);
     // Mirror of the real host's required tool fields (host.ts:63-73).
     for (const [key, def] of pi.tools) {
       assert.equal(typeof def.name, 'string', `${key}: name is a string`);
@@ -302,7 +302,7 @@ describe('extension + tools wiring (needs core)', () => {
     if (!findTools?.registerFindTools || !search?.findPaths) return t.skip('core not landed yet');
     const pi = fakePi();
     findTools.registerFindTools(pi, { search, frecency }, { mode: 'additive' });
-    assert.deepEqual([...pi.tools.keys()].sort(), ['ffcallers', 'fffind', 'ffgrep', 'ffoutline', 'outline'], 'additive leaves host names alone');
+    assert.deepEqual([...pi.tools.keys()].sort(), ['ffcallers', 'fffind', 'ffgrep', 'ffoutline', 'ffstructural', 'outline', 'structural'], 'additive leaves host names alone');
   });
 
   it('override aliases execute identically to canonical names', async (t) => {
@@ -331,5 +331,308 @@ describe('extension + tools wiring (needs core)', () => {
     if (!extension?.default) return t.skip('dist/extension.js missing');
     const bare = { registerCommand() {}, registerTool() {} };
     assert.doesNotThrow(() => extension.default(bare));
+  });
+});
+
+describe('compileStructural pattern subset (needs core)', () => {
+  it('lowers $VAR to an identifier-or-string atom', async (t) => {
+    if (!search?.compileStructural) return t.skip('structural core not landed yet');
+    const c = search.compileStructural('console.log($MSG)', { language: 'ts' });
+    assert.ok(c.regex.includes('console\\.log\\('), `literal code escaped: ${c.regex}`);
+    assert.deepEqual(c.groups, ['MSG']);
+    const re = new RegExp(c.regex);
+    assert.ok(re.test('console.log("hi")'), 'string literal fills $VAR');
+    assert.ok(re.test('console.log(foo)'), 'identifier fills $VAR');
+    assert.ok(!re.test('console.log()'), 'empty parens do not fill $VAR');
+    assert.equal(c.language, 'ts');
+  });
+
+  it('lowers $$VAR like $VAR (ast-grep unnamed capture, approximatively)', async (t) => {
+    if (!search?.compileStructural) return t.skip('structural core not landed yet');
+    const c = search.compileStructural('test($$X)');
+    assert.deepEqual(c.groups, ['X']);
+    assert.ok(new RegExp(c.regex).test('test(a)'), 'double-dollar fills one atom');
+  });
+
+  it('fills bare $$$ slots last (named $$$ARGS first)', async (t) => {
+    if (!search?.compileStructural || !search?.previewRewrite) return t.skip('structural core not landed yet');
+    const c = search.compileStructural('f($$$)');
+    const blocks = search.previewRewrite(c, 'g($$$)', [{ path: 'a.ts', line: 1, col: 1, text: 'f(a, b)' }]);
+    assert.equal(blocks.length, 1);
+    assert.ok(blocks[0].includes('+ g(a, b)'), `bare slot filled:\n${blocks[0]}`);
+  });
+
+  it('lowers $$$ to zero-or-more (named or bare)', async (t) => {
+    if (!search?.compileStructural) return t.skip('structural core not landed yet');
+    const re = new RegExp(search.compileStructural('console.log($$$)').regex);
+    assert.ok(re.test('console.log()'), 'bare $$$ matches empty');
+    assert.ok(re.test("console.log('debug: ', key, value)"), 'bare $$$ matches several args');
+    const named = search.compileStructural('function $F($$$ARGS) { $$$ }');
+    assert.deepEqual(named.groups, ['F', 'ARGS', '$$$'], 'bare $$$ keeps its capture slot');
+    assert.ok(new RegExp(named.regex).test('function add(a, b) { return a + b }'), 'named multi matches args');
+  });
+
+  it('reuses a metavar name as a same-shape backreference', async (t) => {
+    if (!search?.compileStructural) return t.skip('structural core not landed yet');
+    const c = search.compileStructural('$A == $A');
+    assert.ok(c.hasBackref, 'repeat flagged');
+    assert.ok(c.regex.includes('\\1'), `repeat lowered to backref: ${c.regex}`);
+    const re = new RegExp(c.regex);
+    assert.ok(re.test('a == a'), 'same shape matches');
+    assert.ok(!re.test('a == b'), 'different shapes do not match');
+  });
+
+  it('keeps non-metavar $ uses literal, escapes regex metachars', async (t) => {
+    if (!search?.compileStructural) return t.skip('structural core not landed yet');
+    const c = search.compileStructural('f(x) price $5');
+    assert.ok(c.regex.includes('f\\(x\\)'), `parens escaped: ${c.regex}`);
+    assert.ok(c.regex.includes('\\$5'), `dollar-digit stays literal: ${c.regex}`);
+    assert.ok(new RegExp(c.regex).test('f(x) price $5'), 'literal round-trips');
+    const home = search.compileStructural('echo $HOME');
+    assert.deepEqual(home.groups, ['HOME'], '$HOME is a metavar (ast-grep-faithful), not text');
+  });
+
+  it('lowers kind: to line shapes, rejects unknown kinds and trailing filters', async (t) => {
+    if (!search?.compileStructural) return t.skip('structural core not landed yet');
+    const call = new RegExp(search.compileStructural('kind:call').regex);
+    assert.ok(call.test('foo(1)'), 'bare call matches');
+    assert.ok(call.test('a.b(x)'), 'member call matches');
+    assert.throws(() => search.compileStructural('kind:nope'), /unknown structural kind/, 'unknown kind throws');
+    assert.throws(() => search.compileStructural('kind:call logger'), /bare kind/, 'trailing filter rejected');
+  });
+
+  it('lowers symbol: to def lines and records references: for delegation', async (t) => {
+    if (!search?.compileStructural) return t.skip('structural core not landed yet');
+    const sym = search.compileStructural('symbol:thing');
+    assert.equal(sym.mode, 'symbol');
+    const re = new RegExp(sym.regex);
+    assert.ok(re.test('function thing('), 'function def matches');
+    assert.ok(re.test('export class thing'), 'class def matches');
+    const ref = search.compileStructural('references:thing');
+    assert.equal(ref.mode, 'references');
+    assert.equal(ref.symbolName, 'thing');
+    assert.equal(ref.regex, '');
+    assert.throws(() => search.compileStructural('symbol:'), /needs a name/, 'empty symbol: throws');
+    assert.throws(() => search.compileStructural('   '), /must not be empty/, 'empty pattern throws');
+  });
+
+  it('parses inside:/has: two-phase separators, rejects malformed ones', async (t) => {
+    if (!search?.compileStructural) return t.skip('structural core not landed yet');
+    const inside = search.compileStructural('inside: import >> $X');
+    assert.equal(inside.mode, 'inside');
+    assert.ok(inside.outer?.regex, 'outer compiled');
+    assert.ok(inside.description.includes('file-scoped'), 'approximation disclosed in description');
+    const has = search.compileStructural('has: $F << return');
+    assert.equal(has.mode, 'has');
+    assert.throws(() => search.compileStructural('inside: import $X'), /needs "OUTER >> INNER"/, 'missing separator throws');
+    assert.throws(() => search.compileStructural('has:  << return'), /non-empty/, 'empty side throws');
+  });
+
+  it('normalizes language families, never throws on unknown input', async (t) => {
+    if (!search?.normalizeLanguage) return t.skip('structural core not landed yet');
+    assert.equal(search.normalizeLanguage('TypeScript'), 'ts');
+    assert.equal(search.normalizeLanguage('py'), 'py');
+    assert.equal(search.normalizeLanguage('brainfuck'), 'generic');
+    assert.equal(search.normalizeLanguage(undefined), 'generic');
+  });
+});
+
+describe('previewRewrite (needs core)', () => {
+  it('fills $NAME slots and renders -/+ blocks, skipping non-matches', async (t) => {
+    if (!search?.compileStructural || !search?.previewRewrite) return t.skip('structural core not landed yet');
+    const c = search.compileStructural('console.log($MSG)');
+    const blocks = search.previewRewrite(c, 'logger.info($MSG)', [
+      { path: 'a.ts', line: 3, col: 1, text: 'console.log("hi")' },
+      { path: 'a.ts', line: 9, col: 1, text: 'console.log()' },
+    ]);
+    assert.equal(blocks.length, 1, 'non-matching line skipped');
+    assert.ok(blocks[0].startsWith('approx: a.ts:3:1:'), `approx header:\n${blocks[0]}`);
+    assert.ok(blocks[0].includes('- console.log("hi")'), 'minus row');
+    assert.ok(blocks[0].includes('+ logger.info("hi")'), 'slot filled');
+  });
+
+  it('substitutes longest names first and leaves unknown slots literal', async (t) => {
+    if (!search?.compileStructural || !search?.previewRewrite) return t.skip('structural core not landed yet');
+    const c = search.compileStructural('$AB + $A');
+    const blocks = search.previewRewrite(c, '[$AB][$A][$MISSING]', [{ path: 'a.ts', line: 1, col: 1, text: 'foo + f' }]);
+    assert.equal(blocks.length, 1);
+    assert.ok(blocks[0].includes('+ [foo][f][$MISSING]'), `no cross-name corruption, unknown slot literal:\n${blocks[0]}`);
+  });
+
+  it('returns no blocks for references: (nothing to lower)', async (t) => {
+    if (!search?.compileStructural || !search?.previewRewrite) return t.skip('structural core not landed yet');
+    const c = search.compileStructural('references:thing');
+    assert.deepEqual(search.previewRewrite(c, 'x($thing)', [{ path: 'a.ts', line: 1, col: 1, text: 'thing()' }]), []);
+  });
+});
+
+describe('structuralGrep end-to-end (mock scan, needs core)', () => {
+  async function tree() {
+    const root = await mkdtemp(join(tmpdir(), 'omp-find-structural-'));
+    await mkdir(join(root, 'src'), { recursive: true });
+    await mkdir(join(root, 'other'), { recursive: true });
+    await writeFile(join(root, 'src', 'a.ts'), 'import { thing } from "./b";\nconsole.log(thing);\nconst x = 1;\n');
+    await writeFile(join(root, 'src', 'b.ts'), 'export function thing() {\n  return 1;\n}\nthing();\n');
+    await writeFile(join(root, 'other', 'c.py'), 'def thing():\n    return 2\n');
+    await writeFile(join(root, 'eq.txt'), 'x == x\nx == y\n');
+    return root;
+  }
+  it('pattern mode finds call shapes over the live tree', async (t) => {
+    if (!search?.structuralGrep) return t.skip('structural core not landed yet');
+    const root = await tree();
+    try {
+      const res = await search.structuralGrep('console.log($MSG)', { cwd: root, scan: 'mock' });
+      assert.equal(res.total, 1, 'one call site');
+      assert.ok(res.matches[0].path.endsWith('a.ts'), `hit is a.ts: ${res.matches[0].path}`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('backreference patterns run (walker-forced) and filter shapes', async (t) => {
+    if (!search?.structuralGrep) return t.skip('structural core not landed yet');
+    const root = await tree();
+    try {
+      const res = await search.structuralGrep('$A == $A', { cwd: root, scan: 'mock' });
+      const texts = res.matches.map((m) => m.text);
+      assert.ok(texts.includes('x == x'), 'same shape kept');
+      assert.ok(!texts.includes('x == y'), 'different shape dropped');
+      // No scan option at all: must still resolve (rg would reject \1).
+      const any = await search.structuralGrep('$A == $A', { cwd: root });
+      assert.ok(any.matches.some((m) => m.text === 'x == x'), 'backref resolves on the default backend too');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('symbol: finds defs not calls; references: delegates to callersOf', async (t) => {
+    if (!search?.structuralGrep) return t.skip('structural core not landed yet');
+    const root = await tree();
+    try {
+      const defs = await search.structuralGrep('symbol:thing', { cwd: root, scan: 'mock' });
+      assert.ok(defs.total >= 2, `b.ts + c.py defs: ${defs.total}`);
+      assert.ok(defs.matches.every((m) => !m.text.trim().startsWith('thing();')), 'call site excluded');
+      const refs = await search.structuralGrep('references:thing', { cwd: root, scan: 'mock' });
+      assert.ok(refs.matches.some((m) => m.path.endsWith('a.ts')), 'import/member sites found');
+      assert.ok(refs.matches.some((m) => m.text.includes('thing();')), 'call-paren site found');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('inside:/has: scope matches file-by-file', async (t) => {
+    if (!search?.structuralGrep) return t.skip('structural core not landed yet');
+    const root = await tree();
+    try {
+      const inner = await search.structuralGrep('inside: import >> thing', { cwd: root, scan: 'mock' });
+      assert.ok(inner.total > 0, 'inner matches exist');
+      assert.ok(inner.matches.every((m) => m.path.endsWith('a.ts')), `scoped to the importing file: ${inner.matches.map((m) => m.path)}`);
+      const outer = await search.structuralGrep('has: console.log($M) << thing', { cwd: root, scan: 'mock' });
+      assert.ok(outer.matches.some((m) => m.path.endsWith('a.ts')), 'outer kept where the filter co-occurs');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('honors limit/offset paging', async (t) => {
+    if (!search?.structuralGrep) return t.skip('structural core not landed yet');
+    const root = await tree();
+    try {
+      const full = await search.structuralGrep('thing', { cwd: root, scan: 'mock' });
+      assert.ok(full.total >= 3, `several plain hits: ${full.total}`);
+      const page = await search.structuralGrep('thing', { cwd: root, scan: 'mock', limit: 1, offset: 1 });
+      assert.equal(page.matches.length, 1, 'one row per page');
+      assert.equal(page.total, full.total, 'total holds over the full set');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ffstructural tool (needs core)', () => {
+  async function tree() {
+    const root = await mkdtemp(join(tmpdir(), 'omp-find-ffstructural-'));
+    await mkdir(join(root, 'src'), { recursive: true });
+    await writeFile(join(root, 'src', 'a.ts'), 'import { thing } from "./b";\nconsole.log(thing);\n');
+    await writeFile(join(root, 'src', 'b.ts'), 'export function thing() {\n  return 1;\n}\nthing();\n');
+    return root;
+  }
+  const textOf = (out) => out?.content?.[0]?.text ?? String(out);
+  it('rejects zero or several of pattern/symbol/references', async (t) => {
+    if (!findTools?.registerFindTools) return t.skip('tools not landed yet');
+    const pi = fakePi();
+    findTools.registerFindTools(pi, { search, frecency });
+    const tool = pi.tools.get('ffstructural');
+    assert.ok(tool, 'ffstructural registered');
+    for (const params of [{}, { pattern: 'a($X)', symbol: 'a' }, { pattern: 'a($X)', references: 'a' }]) {
+      const out = textOf(await tool.execute('t1', params));
+      assert.match(out, /exactly one of pattern, symbol, references/, `exactly-one enforced for ${JSON.stringify(params)}:\n${out}`);
+    }
+  });
+  it('labels rows approx:, pages via structural_c cursors, honors path + context', async (t) => {
+    if (!findTools?.registerFindTools || !search?.structuralGrep) return t.skip('core not landed yet');
+    const root = await tree();
+    try {
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency });
+      const tool = pi.tools.get('ffstructural');
+      const page1 = textOf(await tool.execute('t1', { references: 'thing', cwd: root, limit: 1 }));
+      assert.ok(page1.includes('approx: '), `rows labeled approx::\n${page1}`);
+      const cursor = /cursor "(structural_c[^"]+)"/.exec(page1)?.[1];
+      assert.ok(cursor, `structural_c cursor footer:\n${page1}`);
+      const page2 = textOf(await tool.execute('t2', { cursor }));
+      assert.ok(page2.includes('approx: '), `page 2 keeps labels:\n${page2}`);
+      const scoped = textOf(await tool.execute('t3', { pattern: 'console.log($MSG)', path: 'src/a.ts', contextBefore: 1, cwd: root }));
+      assert.ok(scoped.includes('src/a.ts') || scoped.includes('a.ts'), `path filter kept a.ts:\n${scoped}`);
+      assert.ok(/approx: +src\/a\.ts:1:/.test(scoped.replace(/\\/g, '/')), `context row attached:\n${scoped}`);
+      const bad = textOf(await tool.execute('t4', { cursor: 'structural_c99999' }));
+      assert.match(bad, /unknown or expired cursor "structural_c99999"/, 'bogus cursor is error text');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('rewrite returns a -/+ preview and never writes', async (t) => {
+    if (!findTools?.registerFindTools || !search?.structuralGrep) return t.skip('core not landed yet');
+    const root = await tree();
+    try {
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency });
+      const tool = pi.tools.get('ffstructural');
+      const out = textOf(await tool.execute('t1', { pattern: 'console.log($MSG)', rewrite: 'logger.info($MSG)', cwd: root }));
+      assert.ok(out.includes('- console.log(thing)'), `minus row:\n${out}`);
+      assert.ok(out.includes('+ logger.info(thing)'), `slot filled:\n${out}`);
+      assert.ok(out.includes('preview only'), `preview notice:\n${out}`);
+      const { readFile } = await import('node:fs/promises');
+      const disk = await readFile(join(root, 'src', 'a.ts'), 'utf8');
+      assert.ok(disk.includes('console.log(thing)'), 'file on disk untouched');
+      const refRewrite = textOf(await tool.execute('t2', { references: 'thing', rewrite: 'x', cwd: root }));
+      assert.match(refRewrite, /needs pattern: or symbol:, not references:/, 'references: + rewrite rejected');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('degrades to per-file counts over maxChars and reports honest zero-states', async (t) => {
+    if (!findTools?.registerFindTools || !search?.structuralGrep) return t.skip('core not landed yet');
+    const root = await tree();
+    try {
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency });
+      const tool = pi.tools.get('ffstructural');
+      const over = textOf(await tool.execute('t1', { pattern: 'thing', maxChars: 10, cwd: root }));
+      assert.match(over, /Per-file counts:/, `counts not rows:\n${over}`);
+      const none = textOf(await tool.execute('t2', { pattern: 'zzz-no-such-shape-qq', cwd: root }));
+      assert.match(none, /0 structural matches/, `honest zero-state:\n${none}`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('structural alias mirrors ffstructural', async (t) => {
+    if (!findTools?.registerFindTools || !search?.structuralGrep) return t.skip('core not landed yet');
+    const root = await tree();
+    try {
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency });
+      const a = textOf(await pi.tools.get('ffstructural').execute('q1', { pattern: 'console.log($MSG)', cwd: root }));
+      const b = textOf(await pi.tools.get('structural').execute('q2', { pattern: 'console.log($MSG)', cwd: root }));
+      assert.equal(a, b, 'alias returns the same page');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

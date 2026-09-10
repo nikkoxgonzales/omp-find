@@ -6,7 +6,7 @@ const GREP_PAGE = 30;
 const PAGE_MAX = 50;
 const cursors = new Map();
 let cursorSeq = 0;
-const CURSOR_PREFIX = { find: "find_c", grep: "grep_c", outline: "outline_c", callers: "callers_c" };
+const CURSOR_PREFIX = { find: "find_c", grep: "grep_c", outline: "outline_c", callers: "callers_c", structural: "structural_c" };
 function storeCursor(s) {
     const id = `${CURSOR_PREFIX[s.kind]}${++cursorSeq}`;
     cursors.set(id, s);
@@ -36,6 +36,40 @@ export function resolveFindMode(explicit, cwd = process.cwd()) {
 }
 function text(t) {
     return { content: [{ type: "text", text: t }] };
+}
+function withDetails(t, details) {
+    return { ...text(t), details };
+}
+/** pi-fff limit-reached notice, emitted next to our cursor footer when a next page exists. */
+function limitNotice(limit) {
+    return `${limit} matches limit reached. Use limit=${limit * 2}`;
+}
+/** gograph query contracts: cursors bind to the fetched snapshot (total + backend).
+ * Resume re-fetches and compares; a mismatch returns restart guidance, never a
+ * silently re-offset page. Cursor id format is unchanged (kind_cN). */
+function snapshotMismatch(stored, live) {
+    return stored.total !== live.total || stored.backend !== live.backend;
+}
+function staleCursor(toolName) {
+    return text(`${toolName}: results changed since page 1; re-run without cursor`);
+}
+/** gograph certainty: import/call-paren sites are exact; member access `.SYM`,
+ * comments, and anything else unresolvable by text heuristics is possible. */
+function callerCertainty(symbol, rowText, ignoreCase) {
+    const flags = ignoreCase ? "i" : "";
+    const esc = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b${esc}\\s*\\(`, flags).test(rowText))
+        return "exact";
+    if (new RegExp(`(?:import|from|require|use|include)\\b[^\n]*\\b${esc}\\b`, flags).test(rowText))
+        return "exact";
+    return "possible";
+}
+/** Tag possible caller rows; the match row renders first, context rows stay indented. */
+function tagCallerRows(symbol, m, ignoreCase) {
+    const rows = renderGrepRows(m);
+    if (callerCertainty(symbol, m.text, ignoreCase) === "possible")
+        rows[0] = `[possible] ${rows[0]}`;
+    return rows;
 }
 function errMsg(err) {
     return err instanceof Error ? err.message : String(err);
@@ -171,6 +205,7 @@ export function registerFindTools(pi, deps, opts = {}) {
     };
     const findDef = (toolName) => ({
         description: "Use instead of shell grep/rg/find/ls because results are fuzzy-ranked, frecency-ordered, paged, and counted. Fuzzy 1-2 terms plus dir/glob/exclusion/git:modified filters with auto-retry on long queries and scan counts; e.g. pattern 'srv usr' with path 'src/' lists ranked matches under src/.",
+        promptSnippet: "Find files by fuzzy name (frecency-ranked, paged, counted)",
         approval: "read",
         promptGuidelines: [
             "fffind: Never use shell find/ls/dir to locate files — use fffind with 1-2 short terms.",
@@ -195,6 +230,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 let all;
                 let relaxed;
                 let scanned, backend;
+                let bound;
                 const cursorId = strParam(params, "cursor");
                 if (cursorId) {
                     const st = cursors.get(cursorId);
@@ -205,7 +241,11 @@ export function registerFindTools(pi, deps, opts = {}) {
                     offset = st.nextOffset;
                     cwd = st.cwd;
                     maxChars = st.maxChars;
-                    all = await search.findPaths(query, { cwd, limit: PAGE_MAX, offset: 0 });
+                    bound = { total: st.total, backend: st.backend };
+                    const live = await runFind(search, query, { cwd, limit: PAGE_MAX, offset: 0 });
+                    all = live.paths;
+                    scanned = live.scanned;
+                    backend = live.backend;
                 }
                 else {
                     const pattern = strParam(params, "pattern") ?? "";
@@ -236,6 +276,8 @@ export function registerFindTools(pi, deps, opts = {}) {
                 const ranked = await Promise.all(all.map(async (p) => ({ p, s: await safeScore(frecency, p) })));
                 ranked.sort((a, b) => b.s - a.s); // stable: frecency first, fuzzy order otherwise
                 const total = ranked.length;
+                if (bound !== undefined && snapshotMismatch(bound, { total, backend }))
+                    return staleCursor(toolName);
                 const page = ranked.slice(offset, offset + limit);
                 const lines = page.map((r) => toDisplay(r.p));
                 if (total > 0 && overBudget(lines.join("\n"), maxChars)) {
@@ -245,17 +287,19 @@ export function registerFindTools(pi, deps, opts = {}) {
                         const dir = slash < 0 ? "." : d.slice(0, slash);
                         byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
                     }
-                    return text(`Matched ${total} files (output exceeds ${maxChars} chars). Per-dir counts: ${countSummary([...byDir])}. Refine path/pattern or raise maxChars.`);
+                    return withDetails(`Matched ${total} files (output exceeds ${maxChars} chars). Per-dir counts: ${countSummary([...byDir])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: scanned ?? total, truncated: true });
                 }
-                if (offset + page.length < total) {
-                    const next = storeCursor({ kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars });
-                    lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`);
+                const hasMore = offset + page.length < total;
+                const details = { totalMatched: total, totalFiles: scanned ?? total, truncated: hasMore };
+                if (hasMore) {
+                    const next = storeCursor({ kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars, total, backend });
+                    lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
                 if (lines.length === 0)
-                    return text(zeroFind(scanned, backend, relaxed));
+                    return withDetails(zeroFind(scanned, backend, relaxed), { totalMatched: 0, totalFiles: scanned ?? 0, truncated: false });
                 if (relaxed !== undefined)
                     lines.unshift(`note: no matches for "${relaxed.from}"; showing results for "${relaxed.to}"`, "");
-                return text(lines.join("\n"));
+                return withDetails(lines.join("\n"), details);
             }
             catch (err) {
                 return text(`${toolName} failed: ${errMsg(err)}`);
@@ -264,6 +308,7 @@ export function registerFindTools(pi, deps, opts = {}) {
     });
     const grepDef = (toolName) => ({
         description: "Use instead of shell grep/rg/find/ls because results are literal-safe, frecency-ranked, paged, and counted. Literal-safe any string (no escaping ever): e.g. pattern 'Chat ID (CHT-XXXX from list_chats or search_chats)' with path 'server.py' searches that one file literally (total returned, no counting needed). Bare-file/dir/glob path filter, zero-state scan facts, context lines, cwd scan root (no cd), maxChars budgets. Regex when literal=false.",
+        promptSnippet: "Search file contents literally or by regex (ranked, paged, counted)",
         approval: "read",
         promptGuidelines: [
             "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with literal:true and a path filter.",
@@ -295,6 +340,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 let limit, offset, cwd;
                 let contextBefore, contextAfter, maxChars;
                 const cursorId = strParam(params, "cursor");
+                let bound;
                 if (cursorId) {
                     const st = cursors.get(cursorId);
                     if (!st || st.kind !== "grep")
@@ -311,6 +357,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     contextBefore = st.contextBefore;
                     contextAfter = st.contextAfter;
                     maxChars = st.maxChars;
+                    bound = { total: st.total, backend: st.backend };
                 }
                 else {
                     const p = strParam(params, "pattern");
@@ -343,6 +390,9 @@ export function registerFindTools(pi, deps, opts = {}) {
                 const pool = pathFilter ? applyPathFilter(res.matches.map((m) => m.path), pathFilter, search.globToRegExp) : null;
                 const matches = pool === null ? res.matches : res.matches.filter((m) => pool.includes(m.path));
                 const total = pool === null ? res.total : matches.length;
+                const liveBackend = typeof res.backend === "string" ? res.backend : undefined;
+                if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend }))
+                    return staleCursor(toolName);
                 const page = pool === null ? matches : matches.slice(offset, offset + limit);
                 if (pool !== null && (contextBefore > 0 || contextAfter > 0) && typeof search.attachContext === "function") {
                     await search.attachContext(cwd, page, contextBefore, contextAfter);
@@ -352,20 +402,22 @@ export function registerFindTools(pi, deps, opts = {}) {
                     const byFile = new Map();
                     for (const m of matches)
                         byFile.set(toDisplay(m.path), (byFile.get(toDisplay(m.path)) ?? 0) + 1);
-                    return text(`Matched ${total} hits in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`);
+                    return withDetails(`Matched ${total} hits in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
                 }
                 if (lines.length === 0) {
                     const backend = typeof res.backend === "string" ? res.backend : undefined;
-                    return text(backend !== undefined ? `0 matches for "${pattern}" (${backend})` : `0 matches for "${pattern}"`);
+                    return withDetails(backend !== undefined ? `0 matches for "${pattern}" (${backend})` : `0 matches for "${pattern}"`, { totalMatched: 0, totalFiles: 0, truncated: false });
                 }
                 lines.push(`(${total} match${total === 1 ? "" : "es"} total)`);
-                if (offset + page.length < total) {
+                const hasMore = offset + page.length < total;
+                const details = { totalMatched: total, totalFiles: new Set(matches.map((m) => m.path)).size, truncated: hasMore };
+                if (hasMore) {
                     const next = storeCursor({
-                        kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, maxChars,
+                        kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, maxChars, total, backend: liveBackend,
                     });
-                    lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`);
+                    lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
-                return text(lines.join("\n"));
+                return withDetails(lines.join("\n"), details);
             }
             catch (err) {
                 return text(`${toolName} failed: ${errMsg(err)}`);
@@ -374,6 +426,7 @@ export function registerFindTools(pi, deps, opts = {}) {
     });
     const outlineDef = (toolName) => ({
         description: "Approximate per-file symbol overview (omp-find). Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline->grep->read. Regex-based, not LSP-accurate; every hit carries a line number — verify with read/ffgrep. Does not record frecency.",
+        promptSnippet: "Outline one file's symbols (approximate shape; verify with read)",
         approval: "read",
         promptGuidelines: [
             "ffoutline: Outline a new file before reading it: a 10-line shape answers 'what lives here' at ~5% of the tokens — never read whole files or run ctags shells to learn shape.",
@@ -397,6 +450,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 if (typeof search.outlineFile !== "function")
                     return text(`${toolName} failed: outline unavailable`);
                 let file, depth, limit, offset, cwd, maxChars;
+                let bound;
                 const cursorId = strParam(params, "cursor");
                 if (cursorId) {
                     const st = cursors.get(cursorId);
@@ -408,6 +462,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     offset = st.nextOffset;
                     cwd = st.cwd;
                     maxChars = st.maxChars;
+                    bound = { total: st.total };
                 }
                 else {
                     const f = strParam(params, "path");
@@ -422,6 +477,8 @@ export function registerFindTools(pi, deps, opts = {}) {
                     maxChars = charsParam(params, "maxChars");
                 }
                 const res = await search.outlineFile(file, { cwd, depth });
+                if (bound !== undefined && snapshotMismatch(bound, { total: res.total }))
+                    return staleCursor(toolName);
                 const disp = toDisplay(file);
                 const page = res.symbols.slice(offset, offset + limit);
                 const lines = page.map((s) => `${disp}:${s.line}:${s.col}: ${s.kind} ${s.name}`);
@@ -429,13 +486,15 @@ export function registerFindTools(pi, deps, opts = {}) {
                     const byKind = new Map();
                     for (const s of res.symbols)
                         byKind.set(s.kind, (byKind.get(s.kind) ?? 0) + 1);
-                    return text(`Matched ${res.total} symbols in ${disp} (output exceeds ${maxChars} chars). Kind counts: ${countSummary([...byKind])}. Refine path or raise maxChars.`);
+                    return withDetails(`Matched ${res.total} symbols in ${disp} (output exceeds ${maxChars} chars). Kind counts: ${countSummary([...byKind])}. Refine path or raise maxChars.`, { totalMatched: res.total, totalFiles: 1, truncated: true });
                 }
-                if (offset + page.length < res.total) {
-                    const next = storeCursor({ kind: "outline", file, depth, limit, nextOffset: offset + page.length, cwd, maxChars });
-                    lines.push("", `... (${res.total - offset - page.length} more; pass cursor "${next}" for the next page)`);
+                const hasMore = offset + page.length < res.total;
+                if (hasMore) {
+                    const next = storeCursor({ kind: "outline", file, depth, limit, nextOffset: offset + page.length, cwd, maxChars, total: res.total });
+                    lines.push("", `... (${res.total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
-                return text(lines.length > 0 ? lines.join("\n") : `No symbols found in ${disp} (approximate scan)`);
+                const details = { totalMatched: res.total, totalFiles: 1, truncated: hasMore };
+                return withDetails(lines.length > 0 ? lines.join("\n") : `No symbols found in ${disp} (approximate scan)`, details);
             }
             catch (err) {
                 return text(`${toolName} failed: ${errMsg(err)}`);
@@ -444,6 +503,7 @@ export function registerFindTools(pi, deps, opts = {}) {
     });
     const callersDef = (toolName) => ({
         description: "Approximate 'who calls X' (omp-find). Use instead of shell grep chains for who-calls-X: definition vs import vs call-site queries collapse into one ranked call. Text heuristics over call parens, imports, and member access — not LSP-accurate; confirm with read.",
+        promptSnippet: "Find who calls a symbol (approximate; confirm with read)",
         approval: "read",
         promptGuidelines: [
             "ffcallers: Never chain shell greps for who-calls-X (definition vs import vs call site) — one ffcallers call ranks them all.",
@@ -455,10 +515,11 @@ export function registerFindTools(pi, deps, opts = {}) {
                 symbol: { type: "string", description: "Symbol name, e.g. 'parseFindQuery'" },
                 path: { type: "string", description: "File constraint, e.g. 'src/', '*.ts'" },
                 cwd: { type: "string", description: "Scan root: absolute directory to search (default: session cwd); refused for filesystem-root and home" },
+                maxChars: { type: "number", description: "Max output chars; when exceeded returns per-file counts instead of rows" },
                 ignoreCase: { type: "boolean", description: "Case-insensitive match" },
                 limit: { type: "number", description: "Max matches per page (default 30, max 50)" },
                 cursor: { type: "string", description: "Opaque pagination cursor from a previous call" },
-                maxChars: { type: "number", description: "Max output chars; when exceeded returns per-file counts instead of rows" },
+                exact_only: { type: "boolean", description: "Exact-only: drop possible mentions (member access `.SYM`, comments), keep import/call-paren sites" },
             },
             required: ["symbol"],
             additionalProperties: false,
@@ -467,8 +528,9 @@ export function registerFindTools(pi, deps, opts = {}) {
             try {
                 if (typeof search.callersOf !== "function")
                     return text(`${toolName} failed: callers unavailable`);
-                let symbol, ignoreCase, pathFilter;
+                let symbol, ignoreCase, pathFilter, exactOnly;
                 let limit, offset, cwd, maxChars;
+                let bound;
                 const cursorId = strParam(params, "cursor");
                 if (cursorId) {
                     const st = cursors.get(cursorId);
@@ -477,10 +539,12 @@ export function registerFindTools(pi, deps, opts = {}) {
                     symbol = st.symbol;
                     ignoreCase = st.ignoreCase;
                     pathFilter = st.pathFilter;
+                    exactOnly = st.exactOnly;
                     limit = st.limit;
                     offset = st.nextOffset;
                     cwd = st.cwd;
                     maxChars = st.maxChars;
+                    bound = { total: st.total, backend: st.backend };
                 }
                 else {
                     const s = strParam(params, "symbol");
@@ -489,6 +553,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     symbol = s;
                     ignoreCase = params["ignoreCase"] === true;
                     pathFilter = strParam(params, "path");
+                    exactOnly = params["exact_only"] === true;
                     limit = numParam(params, "limit") ?? GREP_PAGE;
                     offset = 0;
                     cwd = cwdParam(params);
@@ -497,22 +562,149 @@ export function registerFindTools(pi, deps, opts = {}) {
                 const res = await search.callersOf(symbol, { cwd, ignoreCase });
                 const pool = pathFilter ? applyPathFilter(res.matches.map((m) => m.path), pathFilter, search.globToRegExp) : null;
                 const filtered = pool === null ? res.matches : res.matches.filter((m) => pool.includes(m.path));
-                const ranked = await Promise.all(filtered.map(async (m) => ({ m, s: await safeScore(frecency, m.path) })));
+                const certain = exactOnly ? filtered.filter((m) => callerCertainty(symbol, m.text, ignoreCase) === "exact") : filtered;
+                const ranked = await Promise.all(certain.map(async (m) => ({ m, s: await safeScore(frecency, m.path) })));
                 ranked.sort((a, b) => b.s - a.s); // stable: frecency first, path order otherwise
                 const total = ranked.length;
+                const liveBackend = typeof res.backend === "string" ? res.backend : undefined;
+                if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend }))
+                    return staleCursor(toolName);
                 const page = ranked.slice(offset, offset + limit);
-                const lines = page.flatMap((r) => renderGrepRows(r.m));
+                const lines = page.flatMap((r) => tagCallerRows(symbol, r.m, ignoreCase));
                 if (total > 0 && overBudget(lines.join("\n"), maxChars)) {
                     const byFile = new Map();
                     for (const r of ranked)
                         byFile.set(toDisplay(r.m.path), (byFile.get(toDisplay(r.m.path)) ?? 0) + 1);
-                    return text(`Matched ${total} approximate references to ${symbol} in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path or raise maxChars.`);
+                    return withDetails(`Matched ${total} approximate references to ${symbol} in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
                 }
-                if (offset + page.length < total) {
-                    const next = storeCursor({ kind: "callers", symbol, ignoreCase, pathFilter, limit, nextOffset: offset + page.length, cwd, maxChars });
-                    lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`);
+                if (!exactOnly && total > 0 && certain.length > 0 && !certain.some((m) => callerCertainty(symbol, m.text, ignoreCase) === "exact")) {
+                    lines.unshift(`note: no exact call/import sites for "${symbol}"; ${total} possible mention${total === 1 ? "" : "s"} — confirm with read`, "");
                 }
-                return text(lines.length > 0 ? lines.join("\n") : `No approximate references to ${symbol} found`);
+                const hasMore = offset + page.length < total;
+                const details = { totalMatched: total, totalFiles: new Set(certain.map((m) => m.path)).size, truncated: hasMore };
+                if (hasMore) {
+                    const next = storeCursor({ kind: "callers", symbol, ignoreCase, pathFilter, exactOnly, limit, nextOffset: offset + page.length, cwd, maxChars, total, backend: liveBackend });
+                    lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+                }
+                return withDetails(lines.length > 0 ? lines.join("\n") : `No approximate references to ${symbol} found`, details);
+            }
+            catch (err) {
+                return text(`${toolName} failed: ${errMsg(err)}`);
+            }
+        },
+    });
+    const structuralDef = (toolName) => ({
+        description: "Approximate structural code search (omp-find). Use instead of hand-rolled AST-ish shell grep chains (piped rg/sed for call shapes, def sites, usages): ast-grep-style $VAR/$$$ patterns lower to one ranked regex call with exactly one of pattern/symbol/references. Regex lowering over live text — not AST-accurate; every row is approx: labeled with a line number — verify with read. rewrite returns a preview diff only and never writes.",
+        approval: "read",
+        promptSnippet: "Search code by AST shape with $VAR/$$$ patterns (approximate; preview-only rewrite)",
+        promptGuidelines: [
+            "ffstructural: Never hand-roll AST-ish shell grep chains (rg pipes/sed for call shapes, def sites, who-calls-X) — one ffstructural call lowers a $VAR/$$$ pattern to a ranked regex search.",
+            "ffstructural: Give exactly one of pattern, symbol, references; rows are approx: labeled — confirm with read. rewrite is preview-only and never writes.",
+        ],
+        parameters: {
+            type: "object",
+            properties: {
+                pattern: { type: "string", description: "Structural pattern: $VAR one atom (identifier/string), $$$ zero-or-more, $A…$A same-shape backreference; kind:/inside:/has: prefixes — e.g. 'console.log($MSG)', 'kind:call', 'inside: import >> $X'" },
+                symbol: { type: "string", description: "Definition lookup by name (regex-lowered, not LSP) — e.g. 'parseFindQuery'" },
+                references: { type: "string", description: "Usage lookup by name via callersOf heuristics — e.g. 'parseFindQuery'" },
+                language: { type: "string", description: "Language family hint for the lowering (ts, py, go, rust, java, cpp; default generic)" },
+                path: { type: "string", description: "File constraint, e.g. 'src/', '*.ts'" },
+                cwd: { type: "string", description: "Scan root: absolute directory to search (default: session cwd); refused for filesystem-root and home" },
+                ignoreCase: { type: "boolean", description: "Case-insensitive match" },
+                limit: { type: "number", description: "Max matches per page (default 30, max 50)" },
+                cursor: { type: "string", description: "Opaque pagination cursor from a previous call" },
+                contextBefore: { type: "number", description: "Context lines before each match (default 0, max 5)" },
+                contextAfter: { type: "number", description: "Context lines after each match (default 0, max 5)" },
+                maxChars: { type: "number", description: "Max output chars; when exceeded returns per-file counts instead of rows" },
+                rewrite: { type: "string", description: "Rewrite template with $NAME slots filled from captures; returns a unified -/+ preview only — nothing is ever written" },
+            },
+            additionalProperties: false,
+        },
+        execute: async (_toolCallId, params) => {
+            try {
+                if (typeof search.structuralGrep !== "function" || typeof search.compileStructural !== "function" || typeof search.previewRewrite !== "function")
+                    return text(`${toolName} failed: structural unavailable`);
+                let query, language, ignoreCase, pathFilter, rewrite;
+                let limit, offset, cwd, contextBefore, contextAfter, maxChars;
+                const cursorId = strParam(params, "cursor");
+                let bound;
+                if (cursorId) {
+                    const st = cursors.get(cursorId);
+                    if (!st || st.kind !== "structural")
+                        return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
+                    query = st.query;
+                    language = st.language;
+                    ignoreCase = st.ignoreCase;
+                    pathFilter = st.pathFilter;
+                    rewrite = st.rewrite;
+                    limit = st.limit;
+                    offset = st.nextOffset;
+                    cwd = st.cwd;
+                    contextBefore = st.contextBefore;
+                    contextAfter = st.contextAfter;
+                    maxChars = st.maxChars;
+                    bound = { total: st.total, backend: st.backend };
+                }
+                else {
+                    const p = strParam(params, "pattern");
+                    const s = strParam(params, "symbol");
+                    const r = strParam(params, "references");
+                    const given = [p, s, r].filter((v) => v !== undefined && v !== "");
+                    if (given.length !== 1)
+                        return text(`${toolName} failed: provide exactly one of pattern, symbol, references`);
+                    query = s !== undefined && s !== "" ? `symbol:${s}` : r !== undefined && r !== "" ? `references:${r}` : p;
+                    language = strParam(params, "language");
+                    ignoreCase = params["ignoreCase"] === true;
+                    pathFilter = strParam(params, "path");
+                    rewrite = strParam(params, "rewrite");
+                    limit = numParam(params, "limit") ?? GREP_PAGE;
+                    offset = 0;
+                    cwd = cwdParam(params);
+                    contextBefore = ctxParam(params, "contextBefore");
+                    contextAfter = ctxParam(params, "contextAfter");
+                    maxChars = charsParam(params, "maxChars");
+                }
+                // Full-set fetch first (path filter + ranking over everything, like ffgrep);
+                // context attaches pre-slice so filtered-out files never steal the window.
+                const res = await search.structuralGrep(query, { cwd, ignoreCase, language, contextBefore, contextAfter });
+                const pool = pathFilter ? applyPathFilter(res.matches.map((m) => m.path), pathFilter, search.globToRegExp) : null;
+                const filtered = pool === null ? res.matches : res.matches.filter((m) => pool.includes(m.path));
+                const ranked = await Promise.all(filtered.map(async (m) => ({ m, s: await safeScore(frecency, m.path) })));
+                ranked.sort((a, b) => b.s - a.s); // stable: frecency first, scan order otherwise
+                const total = ranked.length;
+                const liveBackend = typeof res.backend === "string" ? res.backend : undefined;
+                if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend }))
+                    return staleCursor(toolName);
+                const page = ranked.slice(offset, offset + limit);
+                let lines;
+                if (rewrite !== undefined) {
+                    const compiled = search.compileStructural(query, { language });
+                    if (compiled.mode === "references")
+                        return text(`${toolName} failed: rewrite preview needs pattern: or symbol:, not references:`);
+                    lines = search.previewRewrite(compiled, rewrite, page.map((r) => r.m)).flatMap((b) => b.split("\n"));
+                    if (lines.length > 0)
+                        lines.push("", "[preview only — nothing was written]");
+                }
+                else {
+                    lines = page.flatMap((r) => renderGrepRows(r.m).map((row) => `approx: ${row}`));
+                }
+                const backend = typeof res.backend === "string" ? res.backend : undefined;
+                if (total > 0 && overBudget(lines.join("\n"), maxChars)) {
+                    const byFile = new Map();
+                    for (const r of ranked)
+                        byFile.set(toDisplay(r.m.path), (byFile.get(toDisplay(r.m.path)) ?? 0) + 1);
+                    return withDetails(`Matched ${total} approximate structural hits in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
+                }
+                if (lines.length === 0) {
+                    return text(backend !== undefined ? `0 structural matches for "${query}" (${backend})` : `0 structural matches for "${query}"`);
+                }
+                const hasMore = offset + page.length < total;
+                const details = { totalMatched: total, totalFiles: new Set(filtered.map((m) => m.path)).size, truncated: hasMore };
+                if (hasMore) {
+                    const next = storeCursor({ kind: "structural", query, language, ignoreCase, pathFilter, rewrite, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, maxChars, total, backend: liveBackend });
+                    lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+                }
+                return withDetails(lines.join("\n"), details);
             }
             catch (err) {
                 return text(`${toolName} failed: ${errMsg(err)}`);
@@ -530,6 +722,13 @@ export function registerFindTools(pi, deps, opts = {}) {
     }
     if (typeof search.callersOf === "function") {
         register("ffcallers", "Find callers", callersDef("ffcallers"));
+    }
+    if (typeof search.structuralGrep === "function") {
+        register("ffstructural", "Structural search", structuralDef("ffstructural"));
+        try {
+            register("structural", "Structural search", structuralDef("structural"));
+        }
+        catch { /* alias where the host allows */ }
     }
     if (isOverride) {
         register("find", "Find files", findDef("find"));

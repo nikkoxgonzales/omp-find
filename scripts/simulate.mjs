@@ -244,7 +244,67 @@ await scenario('ffcallers who-calls-X', async () => {
   assert(out.includes('server.py'), `callers missed the server.py call site:\n${out}`);
   return 'import + call-paren sites ranked in one call';
 });
+await scenario('ffcallers certainty labels + exact_only', async () => {
+  await writeFile(join(tree, 'src', 'zzq_certainty.py'), [
+    'zzq_unique_sym()',
+    'obj.zzq_unique_sym',
+    'from m import zzq_unique_sym',
+    '',
+  ].join('\n'));
+  const out = await callTool('ffcallers', { symbol: 'zzq_unique_sym', cwd: tree });
+  show('ffcallers certainty', out);
+  const fwd = out.replace(/\\/g, '/');
+  assert(fwd.includes('src/zzq_certainty.py:1:'), `call-paren row missing:\n${out}`);
+  assert(!fwd.includes('[possible] src/zzq_certainty.py:1:'), `exact row mistagged:\n${out}`);
+  assert(!fwd.includes('[possible] src/zzq_certainty.py:3:'), `import row mistagged:\n${out}`);
+  assert(fwd.includes('[possible] src/zzq_certainty.py:2:'), `member mention untagged:\n${out}`);
+  const exact = await callTool('ffcallers', { symbol: 'zzq_unique_sym', cwd: tree, exact_only: true });
+  assert(!exact.replace(/\\/g, '/').includes('zzq_certainty.py:2:'), `exact_only leaked a possible row:\n${exact}`);
+  return 'exact rows bare, possible rows [possible]-tagged, exact_only drops them';
+});
 
+await scenario('stale cursor refuses a shifted page', async () => {
+  const rel = join('src', 'zzq_stale.py');
+  await writeFile(join(tree, rel), 'zzq_stale_sym()\nzzq_stale_sym()\n');
+  const page1 = await callTool('ffcallers', { symbol: 'zzq_stale_sym', cwd: tree, limit: 1 });
+  const cursor = cursorOf(page1);
+  assert(cursor, `page 1 has no cursor footer:\n${page1}`);
+  await writeFile(join(tree, rel), 'zzq_stale_sym()\nzzq_stale_sym()\nzzq_stale_sym()\n');
+  const resumed = await callTool('ffcallers', { cursor });
+  show('stale resume', resumed);
+  assert(/results changed since page 1; re-run without cursor/.test(resumed), `stale cursor silently re-paged:\n${resumed}`);
+  return 'total mismatch → restart guidance, never a shifted page';
+});
+
+await scenario('ffstructural pattern + references + cursor + approx labels', async () => {
+  const pat = await callTool('ffstructural', { pattern: 'parseFindQuery($$$)', path: 'src/', cwd: tree });
+  show('ffstructural pattern', pat);
+  assert(pat.includes('approx: '), `rows lack approx: labels:\n${pat}`);
+  assert(pat.includes('server.py'), `pattern missed the server.py call site:\n${pat}`);
+  const page1 = await callTool('ffstructural', { references: 'parseFindQuery', cwd: tree, limit: 1 });
+  show('ffstructural references page 1', page1);
+  const cursor = cursorOf(page1);
+  assert(cursor && cursor.startsWith('structural_c'), `page 1 has no structural_c cursor footer:\n${page1}`);
+  const page2 = await callTool('ffstructural', { cursor });
+  show('ffstructural page 2', page2);
+  assert(page2.includes('approx: '), `page 2 lost approx: labels:\n${page2}`);
+  const sym = await callTool('ffstructural', { symbol: 'serve', cwd: tree });
+  show('ffstructural symbol', sym);
+  assert(sym.includes('serve'), `symbol: missed "def serve":\n${sym}`);
+  const prev = await callTool('ffstructural', { pattern: 'parseFindQuery($$$)', rewrite: 'lookup($$$)', cwd: tree });
+  show('ffstructural rewrite preview', prev);
+  assert(prev.includes('- ') && prev.includes('+ '), `preview lacks -/+ rows:\n${prev}`);
+  assert(prev.includes('preview only'), `preview lacks the no-write notice:\n${prev}`);
+  return 'shape query + delegation + cursor + preview-only rewrite on the installed surface';
+});
+if (tools.has('structural')) {
+  await scenario('structural alias mirrors ffstructural', async () => {
+    const out = await callTool('structural', { pattern: 'parseFindQuery($$$)', path: 'src/', cwd: tree });
+    show('structural alias', out);
+    assert(out.includes('server.py'), `structural alias diverged:\n${out}`);
+    return 'alias consistent';
+  });
+}
 if (tools.has('find') || tools.has('grep')) {
   await scenario('override aliases find/grep mirror fffind/ffgrep', async () => {
     if (tools.has('find')) {

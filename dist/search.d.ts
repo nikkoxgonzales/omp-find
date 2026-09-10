@@ -91,3 +91,7 @@ export declare function clearCache(): Promise<void>;
 `search` dep carries it without extra host wiring. */
 export { outlineFile } from "./outline.js";
 export type { OutlineSymbol, OutlineResult, OutlineOptions } from "./outline.js";
+/** ffstructural core lives in structural.ts; re-exported here so the tool layer's
+`search` dep carries it without extra host wiring (same shape as outlineFile). */
+export { compileStructural, structuralGrep, previewRewrite, normalizeLanguage } from "./structural.js";
+export type { CompiledStructural, StructuralMode, StructuralOptions } from "./structural.js";

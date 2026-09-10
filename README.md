@@ -11,11 +11,12 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 - **`fffind`** — fuzzy file-path search over the live tree; exact and stem basename matches rank first.
 - **`ffgrep`** — content search, literal by default, regex when `literal=false`; `contextBefore`/`contextAfter` (max 5) disambiguate without follow-up reads.
 - **`ffoutline`** (`outline` alias) — approximate per-file symbol overview. Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline → grep → read. Regex-based, explicitly approximate, every hit carries a line number.
-- **`ffcallers`** — approximate "who calls X". Use instead of shell grep chains: definition-vs-import-vs-call-site queries collapse into one frecency-ranked call. Text heuristics, explicitly approximate — confirm with read.
-- **`maxChars` budgets** — on `fffind`/`ffgrep`/`ffoutline`/`ffcallers`. Over-budget output degrades to counts instead of shell-pipe dumps: per-dir (find), per-file (grep/callers), kind counts (outline).
+- **`ffcallers`** — approximate "who calls X". Use instead of shell grep chains: definition-vs-import-vs-call-site queries collapse into one frecency-ranked call. Text heuristics, explicitly approximate — confirm with read. Rows carry certainty labels: import/call-paren sites are exact, member mentions are `[possible]`-tagged; `exact_only` drops the possible rows.
+- **`ffstructural`** (`structural` alias) — approximate structural search. Use instead of hand-rolled AST-ish shell grep chains: `$VAR`/`$$$` patterns, `kind:`/`symbol:`/`references:`/`inside:`/`has:` lower to one ranked regex call with exactly one of pattern/symbol/references; `rewrite` returns a `-`/`+` preview and never writes. Regex lowering, explicitly approximate — every row is `approx:` labeled.
+- **`maxChars` budgets** — on `fffind`/`ffgrep`/`ffoutline`/`ffcallers`/`ffstructural`. Over-budget output degrades to counts instead of shell-pipe dumps: per-dir (find), per-file (grep/callers/structural), kind counts (outline).
 - **Query subset** — `dir/` prefix, `*.ext`-style globs, `!` exclusions, `git:modified`; leftover words fuzzy-match the path.
 - **Per-project JSON frecency** — every opened file bumps count + recency (7-day half-life decay); frequent/recent paths sort first. Stored under `%LOCALAPPDATA%/omp-find` (Windows) or `~/.omp/var/omp-find`, keyed by project-root hash.
-- **Cursor pagination** — default 30 results per page, max 50; fuller pages return an opaque `cursor` for the next page.
+- **Cursor pagination** — default 30 results per page, max 50; fuller pages return an opaque `cursor` for the next page. Cursors bind to the fetched snapshot (result total + backend): resuming after the tree changes returns restart guidance (`results changed since page 1; re-run without cursor`), never a silently shifted page.
 - **Override vs additive** — `fffind` / `ffgrep` are always registered; override (default) additionally claims `find` / `grep`, additive leaves the host's names alone.
 - **No persistent index** — `/find-rescan` just drops the frecency store; the next search rebuilds from disk. Runaway-tree guard refuses filesystem-root and home-directory scans.
 
@@ -27,6 +28,7 @@ Unlike omp-peers, there is no injected per-prompt note — the agent sees tool c
 fffind ("Find files"; `find` in override mode)
   "Use instead of shell grep/rg/find/ls because results are fuzzy-ranked, frecency-ordered, paged, and counted. [...]"
   approval: read
+  promptSnippet: "Find files by fuzzy name (frecency-ranked, paged, counted)"
   promptGuidelines:
     "fffind: Never use shell find/ls/dir to locate files — use fffind with 1-2 short terms."
     "fffind: Keep fffind queries SHORT: 1-2 terms (e.g. 'user_service'); add terms only to narrow, never as OR."
@@ -40,6 +42,7 @@ fffind ("Find files"; `find` in override mode)
 ffgrep ("Grep content"; `grep` in override mode)
   "Use instead of shell grep/rg/find/ls because results are literal-safe, frecency-ranked, paged, and counted. [...]"
   approval: read
+  promptSnippet: "Search file contents literally or by regex (ranked, paged, counted)"
   promptGuidelines:
     "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with literal:true and a path filter."
     "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; stay literal unless regex is needed."
@@ -59,6 +62,7 @@ ffgrep ("Grep content"; `grep` in override mode)
 ffoutline ("Outline file"; `outline` alias, always registered)
   "Approximate per-file symbol overview (omp-find). Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline->grep->read. Regex-based, not LSP-accurate; every hit carries a line number — verify with read/ffgrep. Does not record frecency."
   approval: read
+  promptSnippet: "Outline one file's symbols (approximate shape; verify with read)"
   promptGuidelines:
     "ffoutline: Outline a new file before reading it — never read whole files or run ctags shells to learn shape."
     "ffoutline: Compose outline->grep->read: outline for shape, ffgrep on one symbol, read the range."
@@ -70,6 +74,7 @@ ffoutline ("Outline file"; `outline` alias, always registered)
 ffcallers ("Find callers")
   "Approximate 'who calls X' (omp-find). Use instead of shell grep chains for who-calls-X: definition vs import vs call-site queries collapse into one ranked call. Text heuristics over call parens, imports, and member access — not LSP-accurate; confirm with read."
   approval: read
+  promptSnippet: "Find who calls a symbol (approximate; confirm with read)"
   promptGuidelines:
     "ffcallers: Never chain shell greps for who-calls-X — one ffcallers call ranks them all."
     "ffcallers: Confirm shortlisted sites with read; output is approximate, not LSP references."
@@ -79,7 +84,29 @@ ffcallers ("Find callers")
   limit: "Max matches per page (default 30, max 50)"
   cursor: "Opaque pagination cursor from a previous call"
   maxChars: "Max output chars; when exceeded returns per-file counts instead of rows"
-Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." (no pattern/path/symbol, unknown/expired cursor, non-absolute cwd).
+  exact_only: "Exact-only: drop possible mentions (member access `.SYM`, comments), keep import/call-paren sites"
+ffstructural ("Structural search"; `structural` alias, always registered)
+  "Approximate structural code search (omp-find). Use instead of hand-rolled AST-ish shell grep chains (piped rg/sed for call shapes, def sites, usages): ast-grep-style $VAR/$$$ patterns lower to one ranked regex call with exactly one of pattern/symbol/references. Regex lowering over live text — not AST-accurate; every row is approx: labeled with a line number — verify with read. rewrite returns a preview diff only and never writes."
+  approval: read
+  promptSnippet: "Search code by AST shape with $VAR/$$$ patterns (approximate; preview-only rewrite)"
+  promptGuidelines:
+    "ffstructural: Never hand-roll AST-ish shell grep chains (rg pipes/sed for call shapes, def sites, who-calls-X) — one ffstructural call lowers a $VAR/$$$ pattern to a ranked regex search."
+    "ffstructural: Give exactly one of pattern, symbol, references; rows are approx: labeled — confirm with read. rewrite is preview-only and never writes."
+  pattern: "Structural pattern: $VAR one atom (identifier/string), $$$ zero-or-more, $A…$A same-shape backreference; kind:/inside:/has: prefixes"
+  symbol: "Definition lookup by name (regex-lowered, not LSP)"
+  references: "Usage lookup by name via callersOf heuristics"
+  language: "Language family hint (ts, py, go, rust, java, cpp; default generic)"
+  path: "File constraint, e.g. 'src/', '*.ts'"
+  ignoreCase: "Case-insensitive match"
+  limit: "Max matches per page (default 30, max 50)"
+  cursor: "Opaque pagination cursor from a previous call"
+  contextBefore: "Context lines before each match (default 0, max 5)"
+  contextAfter: "Context lines after each match (default 0, max 5)"
+  maxChars: "Max output chars; when exceeded returns per-file counts instead of rows"
+  rewrite: "Rewrite template with $NAME slots; returns a unified -/+ preview only — nothing is ever written"
+Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." (no/excess pattern/symbol/references, unknown/expired cursor, non-absolute cwd).
+Stale cursors (tree changed since page 1) return restart guidance as text: "...: results changed since page 1; re-run without cursor".
+Each execute also returns `details: { totalMatched, totalFiles, truncated }` (pi-fff packaging: totals over the full result set, `truncated` when a next page or count-fallback applies); hosts that ignore it see identical text. Paged results add a `"<limit> matches limit reached. Use limit=<2×limit>"` notice next to the cursor footer.
 ```
 
 ```text
@@ -87,7 +114,17 @@ Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline 
 src/user.ts
 src/user_service.ts
 
-... (2 more; pass cursor "c1" for the next page)
+> ffcallers { "symbol": "parseFindQuery" }   # one ranked call, not a shell grep chain
+src/tools.ts:210:9: query = [dirParam, pattern]...
+(1 match total)
+
+> ffstructural { "pattern": "console.log($MSG)", "rewrite": "logger.info($MSG)" }   # shape query + preview-only rewrite
+approx: src/a.ts:3:5:
+- console.log(thing)
++ logger.info(thing)
+
+[preview only — nothing was written]
+30 matches limit reached. Use limit=60
 
 > ffgrep { "pattern": "Chat ID (CHT-XXXX from list_chats or search_chats)", "path": "server.py" }
 server.py:42:5: // Chat ID (CHT-XXXX from list_chats or search_chats) ...
@@ -147,7 +184,7 @@ caches dropped (nothing cached)
 | `fffind` (`pattern`, `path`, `cwd`, `limit`, `cursor`, `maxChars`) | Ranked file paths, workspace-relative; frecency-sorted within fuzzy order. 3+-word zero-result queries retry once with the first 2 terms; empty results report files scanned + backend. Over budget → per-dir counts. |
 | `ffgrep` (`pattern`, `path`, `literal`, `ignoreCase`, `wholeWord`, `smartCase`, `cwd`, `limit`, `cursor`, `contextBefore`, `contextAfter`, `maxChars`) | `path:line:col: text` matches plus a `(N matches total)` line; path filter applies over the full result set. Empty results report the pattern + backend. Context lines (indented, max 5/side) disambiguate without follow-up reads; over budget → per-file counts. |
 | `ffoutline` (`path`, `cwd`, `depth`, `limit`, `cursor`, `maxChars`) | Approximate `path:line:col: kind name` overview — use instead of full reads/ctags shells; composes outline → grep → read. Over budget → kind counts. |
-| `ffcallers` (`symbol`, `path`, `cwd`, `ignoreCase`, `limit`, `cursor`, `maxChars`) | Approximate `path:line:col: text` reference sites — use instead of shell grep chains; frecency-ranked. Over budget → per-file counts. |
+| `ffcallers` (`symbol`, `path`, `cwd`, `ignoreCase`, `limit`, `cursor`, `maxChars`, `exact_only`) | Approximate `path:line:col: text` reference sites — use instead of shell grep chains; frecency-ranked. Import/call-paren rows are exact, member mentions carry `[possible]`; `exact_only` keeps exact rows. Over budget → per-file counts. |
 | `/find-health` | Scan backend status (rg version or walker fallback) plus frecency status, with ok/warn/error levels. |
 | `/find-rescan` | Drops the frecency store (nothing else is cached). |
 

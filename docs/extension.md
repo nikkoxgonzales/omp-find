@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.4.0). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.5.0). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -29,6 +29,11 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   `grepContents`; filtered ones fetch all then filter + slice (188–194) — a bounded
   fetch first would drop hits outside the page (comment 186–187). Row format
   `path:line:col: text` (195). Same cursor/error conventions as fffind.
+- **Output envelope** — every execute returns `{content, details:
+  {totalMatched, totalFiles, truncated}}` (pi-fff packaging; totals over the full
+  result set, `truncated` when a next page or count-fallback applies). Each def
+  carries a one-line `promptSnippet` (guidelines unchanged); paged results add a
+  `"<limit> matches limit reached. Use limit=<2×limit>"` notice next to the cursor footer.
 - **Override vs additive** (`tools.ts:94–95, 208–213`): `fffind`/`ffgrep` always
   registered; `override` (default) additionally claims `find`/`grep` with the same
   handlers. Dual-arity `register` shim (99–103): single-object if host takes 1 arg,
@@ -70,6 +75,7 @@ Default 30, max 50, enforced in two places: `numParam` clamps tool params
 200-entry cap with oldest eviction) capturing full query state (query/limit/offset/cwd;
 pattern/literal/ignoreCase/pathFilter/…). Footer when more remain:
 `... (N more; pass cursor "…" for the next page)` (`tools.ts:139–142, 196–201`).
+Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged.
 
 ## Scan backends
 
@@ -130,8 +136,8 @@ frecency status. Dev: `npm install && npm test`.
 ## Symbol-direction tools (additive; zero deps, fresh-scan intact)
 
 Vs-shell positioning is the moat: each card tells the agent what shell habit it
-replaces. All four tools take `maxChars` with tiered fallbacks (find→per-dir
-counts, grep/callers→per-file counts, outline→kind counts) complementing cursors.
+replaces. All five tools take `maxChars` with tiered fallbacks (find→per-dir
+counts, grep/callers/structural→per-file counts, outline→kind counts) complementing cursors.
 
 - **`ffoutline`** (`outline` alias) — `src/outline.ts`: `outlineFile(file, {cwd,
   depth, limit, offset})` → `{symbols: {line, col, kind, name}[], total}`.
@@ -149,11 +155,28 @@ counts, grep/callers→per-file counts, outline→kind counts) complementing cur
   definition lines filtered, merged/deduped by `path:line`, sorted path→line,
   paged; tools-side frecency-rank + path filter + cursor (`callers_cN`).
   Card: "Use instead of shell grep chains for who-calls-X … not LSP-accurate."
+  Rows carry gograph certainty: import/call-paren sites exact, member mentions
+  `[possible]`-tagged (`tagCallerRows`); `exact_only` keeps exact rows; zero-exact
+  sets prepend narrowing guidance instead of a merged guess.
+- **`ffstructural`** (`structural` alias) — `src/structural.ts`:
+  `compileStructural(pattern, {language})` lowers the ast-grep subset
+  (`$VAR` identifier/string atom, `$$$` zero-or-more, `$A…$A` backreference,
+  `kind:` line shapes, `symbol:` def lines, `references:` delegation,
+  `inside: A >> B` / `has: A << B` file-scoped two-phase) to single-line
+  regexes; `structuralGrep` runs them via `grepContents` (`literal: false`)
+  or `callersOf`, forcing the walker (`scan: "mock"`) when a backreference
+  is present because rg's engine rejects `\N`. `previewRewrite` fills
+  `$NAME` slots from first-occurrence groups (longest-first) into `-`/`+`
+  blocks — preview only, no write path exists. Tool takes exactly one of
+  pattern/symbol/references (+ language/path/ignoreCase/rewrite/context/
+  maxChars), rows labeled `approx:`, cursor (`structural_cN`).
+  Card: "Use instead of hand-rolled AST-ish shell grep chains … rewrite
+  returns a preview diff only and never writes." Re-exported through
+  `search.ts` like `outlineFile`.
 - **ffgrep context** — `GrepOptions.contextBefore/contextAfter` (cap 5 via
   `clampContext`, default 0); `GrepMatch.before/after`; `attachContext` slices
   file lines (each file read once) for BOTH backends — `rg --vimgrep` silently
   drops `-B`/`-C`, so no `-B`/`-C` is passed. Context rows render indented
   without a column (`  path:line: text`); cursor state carries the windows;
-  path-filtered queries attach post-filter to the page only.
 - **Cursor ids** — `storeCursor` prefixes per kind (`find_c`/`grep_c`/`outline_c`/
-  `callers_c`), 200-entry cap, unchanged eviction.
+  `callers_c`/`structural_c`), 200-entry cap, unchanged eviction.
