@@ -1,14 +1,16 @@
 /**
  * omp-find OMP/pi extension entry.
  *
- * Wires the core worker's modules (`tools.ts`, `search.ts`, `frecency.ts`)
- * with dynamic `import()` so this scaffold installs and compiles BEFORE the
- * core lands: a failed import just leaves tool registration for later.
- * The two `/find-*` commands register synchronously against a shared `deps`
- * bag that the async wiring fills in once the core modules resolve.
+ * Static wiring: the core modules (`tools.ts`, `search.ts`, `frecency.ts`) are
+ * imported directly, so a missing core fails loudly at load instead of
+ * silently skipping tool registration. Host interactions (command/tool
+ * registration, event subscription) stay best-effort `try/catch` — an unknown
+ * host must never take down extension load.
  */
-export default function ompFindExtension(pi: {
+interface FindExtensionHost {
     registerCommand?: unknown;
     registerTool?: unknown;
     on?: (event: string, listener: (...args: never[]) => unknown) => void;
-}): void;
+}
+export default function ompFindExtension(pi: FindExtensionHost): void;
+export {};

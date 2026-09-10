@@ -223,6 +223,25 @@ describe('grepContents bounds (needs core)', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('ffgrep with a dir filter finds hits beyond the first page (no bounded-fetch truncation)', async (t) => {
+    if (!findTools?.registerFindTools) return t.skip('tools not landed yet');
+    const other = Array.from({ length: 55 }, (_, i) => ({ path: `other/f${i}.txt`, line: 1, col: 1, text: 'TRUNC_MARKER_4x8 lives here' }));
+    const srcHits = Array.from({ length: 5 }, (_, i) => ({ path: `src/t${i}.ts`, line: 1, col: 1, text: 'TRUNC_MARKER_4x8 lives here too' }));
+    const stubSearch = {
+      findPaths: async () => [],
+      grepContents: async () => ({ matches: [...other, ...srcHits], total: 60 }),
+      globToRegExp: search?.globToRegExp,
+    };
+    const pi = fakePi();
+    findTools.registerFindTools(pi, { search: stubSearch, frecency });
+    const tool = pi.tools.get('grep');
+    assert.ok(tool, 'grep registered under the override default');
+    const out = await tool.execute('t1', { pattern: 'TRUNC_MARKER_4x8', path: 'src/' });
+    const textOut = out?.content?.[0]?.text ?? String(out);
+    assert.ok(textOut.includes('src/t0.ts'), `dir filter finds hits past the first page:\n${textOut}`);
+    assert.ok(!textOut.includes('No matches found'), 'filter does not wipe late hits');
+  });
 });
 
 describe('frecency record/score round-trip (needs core)', () => {
@@ -247,7 +266,7 @@ describe('extension + tools wiring (needs core)', () => {
     if (oldEnv === undefined) delete process.env.OMP_FIND_MODE;
     else process.env.OMP_FIND_MODE = oldEnv;
     assert.ok(pi.commands.has('find-health'), 'commands wired via extension');
-    assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep', 'find', 'grep'], `override default wires all four: ${[...pi.tools.keys()]}`);
+    assert.deepEqual([...pi.tools.keys()].sort(), ['ffcallers', 'fffind', 'ffgrep', 'ffoutline', 'find', 'grep', 'outline'], `override default wires all seven: ${[...pi.tools.keys()]}`);
     // Mirror of the real host's required tool fields (host.ts:63-73).
     for (const [key, def] of pi.tools) {
       assert.equal(typeof def.name, 'string', `${key}: name is a string`);
@@ -259,7 +278,7 @@ describe('extension + tools wiring (needs core)', () => {
       assert.ok(def.parameters !== undefined, `${key}: parameters present`);
       assert.equal(typeof def.execute, 'function', `${key}: execute is a function`);
     }
-    pi.emit('session-start', {}, {});
+    pi.emit('session_start', {}, {});
   });
   it('no-arg resolve is override; explicit flag and env take precedence', async (t) => {
     if (!findTools?.resolveFindMode) return t.skip('core tools.ts not landed yet');
@@ -279,11 +298,11 @@ describe('extension + tools wiring (needs core)', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-  it('additive registers exactly fffind+ffgrep', async (t) => {
+  it('additive registers ff tools without host names', async (t) => {
     if (!findTools?.registerFindTools || !search?.findPaths) return t.skip('core not landed yet');
     const pi = fakePi();
     findTools.registerFindTools(pi, { search, frecency }, { mode: 'additive' });
-    assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep'], 'additive leaves host names alone');
+    assert.deepEqual([...pi.tools.keys()].sort(), ['ffcallers', 'fffind', 'ffgrep', 'ffoutline', 'outline'], 'additive leaves host names alone');
   });
 
   it('override aliases execute identically to canonical names', async (t) => {

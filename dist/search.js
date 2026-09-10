@@ -87,7 +87,7 @@ function runCmd(cmd, args, cwd, timeoutMs = GREP_TIMEOUT_DEFAULT) {
         });
     });
 }
-function pageOf(arr, limit, offset) {
+export function pageOf(arr, limit, offset) {
     const off = Math.max(0, Math.floor(offset ?? 0));
     if (limit === undefined)
         return arr.slice(off);
@@ -102,7 +102,13 @@ function guardCwd(cwd) {
     if (home && path.resolve(home) === cwd)
         throw new Error(`refusing to scan the home directory (${cwd}); run from a project directory`);
 }
-async function walkFiles(cwd, follow) {
+/** Cooperative deadline: the timeout race already rejected, so stop burning CPU
+after the budget (rg is kill-guarded; the walker is not). Throws timeout text. */
+function checkDeadline(deadline, timeoutMs) {
+    if (deadline > 0 && Date.now() > deadline)
+        throw new Error(`grep timed out after ${timeoutMs / 1000}s`);
+}
+async function walkFiles(cwd, follow, deadline = 0, timeoutMs = 0) {
     const out = [];
     async function walk(dir, rel, depth) {
         if (depth > MAX_DEPTH)
@@ -114,6 +120,7 @@ async function walkFiles(cwd, follow) {
         catch {
             return;
         }
+        checkDeadline(deadline, timeoutMs); // per directory batch: abort the orphaned scan, don't finish the tree
         for (const e of entries) {
             if (e.isSymbolicLink() && !follow)
                 continue;
@@ -142,14 +149,14 @@ async function listFiles(cwd, scan, follow) {
     if (scan !== "mock") {
         try {
             const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow", "."], cwd);
-            return stdout.split("\n").map((l) => stripDotSlash(l.trim().replace(/\\/g, "/"))).filter(Boolean);
+            return { files: stdout.split("\n").map((l) => stripDotSlash(l.trim().replace(/\\/g, "/"))).filter(Boolean), backend: "rg" };
         }
         catch (err) {
             if (errCode(err) !== "ENOENT")
                 throw err;
         }
     }
-    return walkFiles(cwd, follow);
+    return { files: await walkFiles(cwd, follow), backend: "walker" };
 }
 /** Fresh `git status --porcelain` per call; null when git fails (not a repo). */
 async function gitModifiedSet(cwd) {
@@ -197,8 +204,8 @@ function applyFindFilters(files, q, modified) {
         return modified === null || modified.has(f);
     });
 }
-/** Subsequence fuzzy score (lower is better; Infinity = no match). Basename matches win. */
-function fuzzyScore(pattern, target) {
+/** Subsequence fuzzy score (lower is better; Infinity = no match). Exact and stem basename matches win. */
+export function fuzzyScore(pattern, target) {
     if (!pattern)
         return 0;
     const p = pattern.toLowerCase().replace(/\s+/g, ""), t = target.toLowerCase();
@@ -213,21 +220,25 @@ function fuzzyScore(pattern, target) {
     if (pi < p.length)
         return Number.POSITIVE_INFINITY;
     const base = t.slice(t.lastIndexOf("/") + 1);
-    let bi = 0;
-    for (let ti = 0; ti < base.length && bi < p.length; ti++)
-        if (base[ti] === p[bi])
-            bi++;
-    return bi >= p.length ? score - 20 : score;
+    if (p === base)
+        return score - 20; // exact basename match
+    // Stem match (upstream PR #728, open): the pattern is the basename minus a
+    // single final extension — `user` vs `user.ts`, but not `user.test` vs
+    // `user.test.ts` (no second dot) and not empty extensions. Tiers: exact -20,
+    // stem -10, fuzzy 0.
+    if (p.length + 2 <= base.length && base[p.length] === "." && base.indexOf(".") === base.lastIndexOf("."))
+        return score - 10;
+    return score;
 }
 const toNative = (p) => p.split("/").join(path.sep);
 /** rg via execFile (piped stdout) prefixes relative paths with `./`; terminals strip it, so clean it here. */
 const stripDotSlash = (p) => p.startsWith("./") ? p.slice(2) : p;
-/** Ranked file paths (workspace-relative, native separators), paged by limit/offset. */
-export async function findPaths(query, opts = {}) {
+/** Full ranked listing plus scan metadata (files listed + serving backend) for zero-state counts. */
+export async function findScanned(query, opts = {}) {
     const cwd = path.resolve(opts.cwd ?? process.cwd());
     guardCwd(cwd);
     const q = parseFindQuery(query);
-    const files = await listFiles(cwd, opts.scan, opts.followSymlinks ?? false);
+    const { files, backend } = await listFiles(cwd, opts.scan, opts.followSymlinks ?? false);
     let modified = null;
     if (q.gitModifiedOnly) {
         modified = await gitModifiedSet(cwd);
@@ -241,14 +252,21 @@ export async function findPaths(query, opts = {}) {
             scored.push({ p: f, s });
     }
     scored.sort((a, b) => a.s - b.s || a.p.length - b.p.length || (a.p < b.p ? -1 : 1));
-    return pageOf(scored, opts.limit, opts.offset).map((e) => toNative(e.p));
+    return { paths: scored.map((e) => toNative(e.p)), scanned: files.length, backend };
 }
-async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs) {
+/** Ranked file paths (workspace-relative, native separators), paged by limit/offset. */
+export async function findPaths(query, opts = {}) {
+    const scan = await findScanned(query, opts);
+    return pageOf(scan.paths, opts.limit, opts.offset);
+}
+async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord = false) {
     const args = ["--vimgrep", "--no-heading", "--no-messages", "--max-columns", "500", "--max-filesize", MAX_GREP_SIZE, follow ? "--follow" : "--no-follow"];
     if (literal)
         args.push("--fixed-strings");
     if (ignoreCase)
         args.push("--ignore-case");
+    if (wholeWord)
+        args.push("--word-regexp"); // composes with --fixed-strings: literal whole words, no regex needed
     args.push("--", pattern, ".");
     const out = [];
     for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split(/\r?\n/)) {
@@ -260,11 +278,14 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs) {
     }
     return out;
 }
-async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow) {
+async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline = 0, timeoutMs = 0, wholeWord = false) {
     let re = null;
-    if (!literal) {
+    if (!literal || wholeWord) {
+        // Whole words need a regex even for literal patterns (escape first, then
+        // wrap); a bare regex pattern wraps as-is. ASCII \b: patterns that start
+        // or end with a non-word char may not match — same as rg -w.
         try {
-            re = new RegExp(pattern, ignoreCase ? "i" : "");
+            re = new RegExp(wholeWord ? `\\b(?:${literal ? escapeRegExp(pattern) : pattern})\\b` : pattern, ignoreCase ? "i" : "");
         }
         catch {
             throw new Error(`invalid regex: ${pattern}`);
@@ -272,7 +293,8 @@ async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow) {
     }
     const needle = ignoreCase ? pattern.toLowerCase() : pattern;
     const out = [];
-    for (const f of await walkFiles(cwd, follow)) {
+    for (const f of await walkFiles(cwd, follow, deadline, timeoutMs)) {
+        checkDeadline(deadline, timeoutMs); // per file batch: abort the orphaned scan between reads
         let text;
         try {
             if ((await fs.stat(path.join(cwd, f))).size > MAX_GREP_BYTES)
@@ -308,6 +330,42 @@ async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow) {
     }
     return out;
 }
+/** Context window cap: contextBefore/contextAfter clamp to 0..5, default 0. */
+export function clampContext(n) {
+    if (typeof n !== "number" || !Number.isFinite(n))
+        return 0;
+    return Math.max(0, Math.min(5, Math.floor(n)));
+}
+/** Slice ±N surrounding lines onto each match (rg --vimgrep drops -B/-C, so both
+backends share this file-slicing pass; each file is read once). Never throws. */
+export async function attachContext(cwdDir, matches, before, after) {
+    const cb = clampContext(before), ca = clampContext(after);
+    if ((cb === 0 && ca === 0) || matches.length === 0)
+        return;
+    const cwd = path.resolve(cwdDir ?? process.cwd());
+    const cache = new Map();
+    for (const m of matches) {
+        let lines = cache.get(m.path);
+        if (lines === undefined) {
+            try {
+                if ((await fs.stat(path.join(cwd, m.path))).size > MAX_GREP_BYTES)
+                    continue;
+                const buf = await fs.readFile(path.join(cwd, m.path));
+                if (buf.indexOf(0) >= 0)
+                    continue; // binary skip
+                lines = buf.toString("utf8").split("\n");
+            }
+            catch {
+                continue;
+            }
+            cache.set(m.path, lines);
+        }
+        if (cb > 0)
+            m.before = lines.slice(Math.max(0, m.line - 1 - cb), m.line - 1).map((t) => t.trim().slice(0, 500));
+        if (ca > 0)
+            m.after = lines.slice(m.line, m.line + ca).map((t) => t.trim().slice(0, 500));
+    }
+}
 export async function grepContents(pattern, opts = {}) {
     const cwd = path.resolve(opts.cwd ?? process.cwd());
     guardCwd(cwd);
@@ -322,34 +380,81 @@ export async function grepContents(pattern, opts = {}) {
             throw new Error(`invalid regex: ${pattern}`);
         }
     }
-    const follow = opts.followSymlinks ?? false, ignoreCase = opts.ignoreCase ?? false;
+    const follow = opts.followSymlinks ?? false;
+    // smartCase is opt-in and wins when enabled: lowercase patterns match
+    // case-insensitively, any uppercase letter restores sensitivity. ignoreCase
+    // keeps working exactly as before when smartCase is off.
+    const ignoreCase = opts.smartCase === true ? !/[A-Z]/.test(pattern) : (opts.ignoreCase ?? false);
+    const wholeWord = opts.wholeWord ?? false;
     const timeoutMs = opts.timeoutMs ?? GREP_TIMEOUT_DEFAULT;
+    const deadline = Date.now() + timeoutMs; // cooperative abort for the walker path
     const run = (async () => {
         let matches;
-        if (opts.scan === "mock")
-            matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow);
+        let backend;
+        if (opts.scan === "mock") {
+            matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord);
+            backend = "walker";
+        }
         else {
             try {
-                matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs);
+                matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord);
+                backend = "rg";
             }
             catch (err) {
                 if (errCode(err) !== "ENOENT")
                     throw err;
-                matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow);
+                matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord);
+                backend = "walker";
             }
         }
-        return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length };
+        return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend };
     })();
     let timer;
     try {
         const overdue = new Promise((_, reject) => {
             timer = setTimeout(() => reject(new Error(`grep timed out after ${timeoutMs / 1000}s`)), timeoutMs);
         });
-        return await Promise.race([run, overdue]);
+        const res = await Promise.race([run, overdue]);
+        await attachContext(opts.cwd, res.matches, opts.contextBefore ?? 0, opts.contextAfter ?? 0);
+        return res;
     }
     finally {
         clearTimeout(timer);
     }
+}
+function escapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+/** Approximate "who calls X": literal-aware text heuristics (call parens, import
+lines, member access), merged/deduped by path:line. Explicitly NOT LSP-accurate:
+same-named locals and comments can match; definition lines are filtered out.
+Callers confirm hits with read. */
+export async function callersOf(symbol, opts = {}) {
+    const cwd = path.resolve(opts.cwd ?? process.cwd());
+    guardCwd(cwd);
+    if (!symbol)
+        throw new Error("callers symbol must not be empty");
+    const esc = escapeRegExp(symbol);
+    const patterns = [`\\b${esc}\\s*\\(`, `(?:import|from|require|use|include)\\b[^\\n]*\\b${esc}\\b`, `\\.${esc}\\b`];
+    const defRe = new RegExp(`^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+)*(?:function|def|fn|func|class)\\b[^\\n]*\\b${esc}\\b`);
+    const seen = new Map();
+    const base = { cwd: opts.cwd, ignoreCase: opts.ignoreCase ?? false, scan: opts.scan, followSymlinks: opts.followSymlinks, timeoutMs: opts.timeoutMs };
+    let backend = "rg";
+    for (const p of patterns) {
+        const r = await grepContents(p, { ...base, literal: false });
+        backend = r.backend;
+        for (const m of r.matches) {
+            if (defRe.test(m.text))
+                continue;
+            const key = `${m.path}:${m.line}`;
+            if (!seen.has(key))
+                seen.set(key, m);
+        }
+    }
+    const merged = [...seen.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line));
+    const page = pageOf(merged, opts.limit, opts.offset);
+    await attachContext(opts.cwd, page, opts.contextBefore ?? 0, opts.contextAfter ?? 0);
+    return { matches: page, total: merged.length, backend };
 }
 /** Best-effort warm scan (no watcher/index — primes the OS cache). Never throws. */
 export async function warmScan() {
@@ -358,15 +463,20 @@ export async function warmScan() {
     }
     catch { /* warm scan never fails session start */ }
 }
-/** One-line status for `/find-health` (string form, read synchronously). */
+/** Fresh rg presence + version and serving backend for `/find-health` (string form, read synchronously). */
 export function status() {
     try {
         const r = spawnSync("rg", ["--version"], { encoding: "utf8" });
-        return `rg: ${r.status === 0 ? r.stdout.split("\n")[0].trim() : "missing"}; index: none (direct scan, no watcher)`;
+        if (r.status === 0) {
+            const version = r.stdout.split("\n")[0].trim();
+            return `rg: ${version}; backend: rg; index: none (fresh scan, no watcher)`;
+        }
     }
-    catch {
-        return "rg: missing; index: none (direct scan, no watcher)";
-    }
+    catch { /* rg missing → walker fallback below */ }
+    return "rg: missing; backend: walker (fallback); index: none (fresh scan, no watcher)";
 }
 /** Drop caches (nothing persistent — resolves for the `/find-rescan` contract). */
 export async function clearCache() { }
+/** ffoutline core lives in outline.ts; re-exported here so the tool layer's
+`search` dep carries it without extra host wiring. */
+export { outlineFile } from "./outline.js";

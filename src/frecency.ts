@@ -9,7 +9,7 @@ const HALF_LIFE_MS = 7 * 24 * 3600 * 1000;
 interface Entry { count: number; last: number }
 interface Store { entries: Record<string, Entry> }
 
-const empty: Store = { entries: {} };
+function fresh(): Store { return { entries: {} }; }
 let cache: Store | null = null;
 let cacheFile: string | null = null;
 
@@ -36,8 +36,8 @@ async function load(file: string): Promise<Store> {
   try {
     const raw = await fs.promises.readFile(file, "utf8");
     const parsed = JSON.parse(raw) as Partial<Store>;
-    cache = parsed && typeof parsed.entries === "object" && parsed.entries !== null ? { entries: parsed.entries } : empty;
-  } catch { cache = empty; }
+    cache = parsed && typeof parsed.entries === "object" && parsed.entries !== null ? { entries: parsed.entries } : fresh();
+  } catch { cache = fresh(); }
   cacheFile = file;
   return cache;
 }
@@ -94,7 +94,8 @@ export function status(): string {
 /** Drop the persisted store + memory cache (for `/find-rescan`). Never throws. */
 export async function clear(): Promise<void> {
   try {
-    cache = empty;
-    await save(empty, storePath());
+    const next = fresh();
+    cache = next;
+    await save(next, storePath());
   } catch { /* best-effort */ }
 }
