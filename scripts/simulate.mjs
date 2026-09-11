@@ -60,6 +60,7 @@ const fixture = {
 for (let i = 0; i < 35; i++) {
   fixture[`a_decoy_${String(i).padStart(2, '0')}.txt`] = `decoy CHT-1234 marker ${i}\n`;
 }
+fixture['.claude_temp/smoke_outlook_mcp.py'] = 'def smoke_first():\n    return 1\n\ndef smoke_second():\n    return 2\n';
 for (const [rel, content] of Object.entries(fixture)) {
   const full = join(tree, rel);
   await mkdir(join(tree, rel.split('/').slice(0, -1).join('/')), { recursive: true }).catch(() => {});
@@ -199,6 +200,19 @@ await scenario('ffgrep literal phrase + bare-file filter (grep -c displacement)'
   show('ffgrep literal parens', literal);
   assert(literal.includes('server.py'), `literal parens phrase did not match:\n${literal}`);
   return 'bare-file filter scoped 36 hits to server.py; parens matched literally';
+});
+await scenario('ffgrep pinned hidden path (explicit pin reaches dot-dirs)', async () => {
+  // Transcript case: an explicitly-pinned hidden path once returned 0 matches
+  // though the file reads fine — rg pruned the dot-dir before the post-filter
+  // ever ran. The pin now scopes the backend itself (regex, literal=false).
+  const out = await callTool('ffgrep', { pattern: 'def smoke_first|def smoke_second', path: '.claude_temp/smoke_outlook_mcp.py', literal: false, cwd: tree });
+  show('ffgrep pinned hidden', out);
+  assert(out.includes('.claude_temp/smoke_outlook_mcp.py:1:'), `pinned hidden path missed its hits:\n${out}`);
+  assert(out.includes('.claude_temp/smoke_outlook_mcp.py:4:'), `second def missed:\n${out}`);
+  const unpinned = await callTool('ffgrep', { pattern: 'def smoke_first|def smoke_second', literal: false, cwd: tree });
+  show('ffgrep unpinned hidden', unpinned);
+  assert(!unpinned.includes('.claude_temp/'), `unpinned search leaks hidden files:\n${unpinned}`);
+  return 'explicit pin searches the hidden file directly; defaults still prune dot-dirs';
 });
 await scenario('ffgrep hashline file headers ([path#TAG] per group)', async () => {
   const out = await callTool('ffgrep', { pattern: 'CHT-1234', path: 'server.py', cwd: tree, limit: 5 });

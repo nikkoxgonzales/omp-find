@@ -3,6 +3,12 @@
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
 
+## [0.8.1]
+
+### Fixed
+
+- Explicit `path` pins (`dir/` or `dir/file`) now reach the scan backends, so pinned hidden/ignored paths are searched instead of silently missing: rg receives the pin positionally in place of `.`, and the walker starts at the pin (bypassing its dot-dir prune) or returns a pinned file directly. Glob (`*.py`) and bare-basename (`file.py`) filters keep today's post-filter path, and unpinned calls keep today's argv and traversal — defaults byte-identical. Measured nuance on rg: a **file** pin is searched regardless of `.gitignore` (an explicitly named file is never ignore-filtered), while a **dir** pin still honors `.gitignore` while traversing inside it.
+
 ## [0.8.0]
 
 ### Added

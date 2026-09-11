@@ -13,6 +13,7 @@ export interface FindOptions {
     offset?: number;
     scan?: string;
     followSymlinks?: boolean;
+    scope?: string;
 }
 export interface GrepOptions {
     cwd?: string;
@@ -28,6 +29,7 @@ export interface GrepOptions {
     contextBefore?: number;
     contextAfter?: number;
     expand?: "none" | "function";
+    scope?: string;
 }
 export interface GrepMatch {
     path: string;

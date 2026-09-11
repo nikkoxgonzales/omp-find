@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.0). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.1). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -21,13 +21,19 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   joins `path` + `pattern` params into one query string (127); empty query → error
   text, not throw (128); `findPaths(query, {cwd, limit: PAGE_MAX, offset: 0})` fetches
   up to 50, frecency re-ranks (`safeScore` per path, stable sort `b.s - a.s`, 134–135),
-  then slices the requested page. Unknown/expired cursor → error text naming the
+  then slices the requested page. A concrete `path`-param pin (`dir/` or `dir/file`)
+  additionally scopes the listing (`scope` through `listFiles`), so pinned dot-dir
+  files list on both backends. Unknown/expired cursor → error text naming the
   cursor (123); all throws caught → `"fffind failed: …"` (145).
 - **`ffgrep`** — content search (`tools.ts:150–207`). `pattern` required (177);
   `literal` defaults true (179), `ignoreCase` opt-in (180). Path filter applies
   **tools-side over the full result set**: unfiltered queries pass limit/offset to
   `grepContents`; filtered ones fetch all then filter + slice (188–194) — a bounded
-  fetch first would drop hits outside the page (comment 186–187). Row format
+  fetch first would drop hits outside the page (comment 186–187). A concrete
+  `dir/` or `dir/file` pin additionally scopes the backend itself (`scope` through
+  `rgGrep`/`fallbackGrep`/`listFiles`: rg gets the pin as its positional path, the
+  walker seeds traversal at the pin), so explicitly-pinned hidden/ignored files hit
+  on both backends; glob and bare-basename forms keep the post-filter only. Row format
   `path:line:col: text` (195). Same cursor/error conventions as fffind. Page rows
   group by file under `[path#TAG]` hashline headers (`hashlineFileHash` /
   `hashlineHeader` next to `toDisplay`; whole-file tag read once per file per

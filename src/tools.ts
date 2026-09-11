@@ -14,8 +14,8 @@ const PAGE_MAX = 50;
 
 type Snapshot = { total: number; backend?: string };
 type CursorState =
-  | { kind: "find"; query: string; limit: number; nextOffset: number; cwd?: string; maxChars?: number; concise: boolean; total: number; backend?: string }
-  | { kind: "grep"; pattern: string; literal: boolean; ignoreCase: boolean; wholeWord: boolean; smartCase: boolean; pathFilter?: string; limit: number; nextOffset: number; cwd?: string; contextBefore: number; contextAfter: number; expand: string; maxChars?: number; concise: boolean; total: number; backend?: string }
+  | { kind: "find"; query: string; limit: number; nextOffset: number; cwd?: string; scope?: string; maxChars?: number; concise: boolean; total: number; backend?: string }
+  | { kind: "grep"; pattern: string; literal: boolean; ignoreCase: boolean; wholeWord: boolean; smartCase: boolean; pathFilter?: string; scope?: string; limit: number; nextOffset: number; cwd?: string; contextBefore: number; contextAfter: number; expand: string; maxChars?: number; concise: boolean; total: number; backend?: string }
   | { kind: "outline"; file: string; depth: number; limit: number; nextOffset: number; cwd?: string; maxChars?: number; concise: boolean; total: number }
   | { kind: "callers"; symbol: string; ignoreCase: boolean; pathFilter?: string; exactOnly: boolean; depth: number; limit: number; nextOffset: number; cwd?: string; maxChars?: number; total: number; backend?: string }
   | { kind: "structural"; query: string; language?: string; ignoreCase: boolean; pathFilter?: string; rewrite?: string; limit: number; nextOffset: number; cwd?: string; contextBefore: number; contextAfter: number; maxChars?: number; total: number; backend?: string };
@@ -329,6 +329,21 @@ function applyPathFilter(paths: string[], filter: string, glob: ((g: string) => 
     return d === f || d.startsWith(`${f}/`) || d.slice(d.lastIndexOf("/") + 1) === f;
   });
 }
+/** Explicit-pin detector for the `path` filter: a concrete `dir/` or
+ * `dir/file` pin (contains a slash, no glob magic) is forwarded to the core
+ * as a backend scope so rg/walker search it directly — hidden/ignored files
+ * included. Glob (`*.py`) and bare-basename (`file.py`) forms return
+ * undefined and keep today's multi-directory post-filter. */
+function scopePin(filter: string | undefined): string | undefined {
+  if (!filter) return undefined;
+  const flat = filter.replace(/\\/g, "/");
+  const f = flat.startsWith("./") ? flat.slice(2) : flat;
+  if (!f.includes("/")) return undefined;
+  if (/[*?[{]/.test(f)) return undefined;
+  const segs = f.split("/").filter(Boolean);
+  if (segs.length === 0 || segs.includes("..")) return undefined;
+  return segs.join("/");
+}
 function ctxParam(params: Record<string, unknown>, key: string): number {
   const v = params[key];
   if (typeof v !== "number" || !Number.isFinite(v)) return 0;
@@ -370,7 +385,7 @@ function expandParam(params: Record<string, unknown>): "none" | "function" {
 }
 /** Core findScanned shape (newer core); older cores expose findPaths only. */
 interface FindScanLike { paths: unknown[]; scanned?: unknown; backend?: unknown }
-type FindScannedFn = (query: string, opts: { cwd?: string; limit: number; offset: number }) => Promise<unknown>;
+type FindScannedFn = (query: string, opts: { cwd?: string; limit: number; offset: number; scope?: string }) => Promise<unknown>;
 function asFindScanned(v: unknown): FindScannedFn | undefined {
   // Named-const cast with reason: typeof-narrowed functions are not directly callable.
   const fn: FindScannedFn | undefined = typeof v === "function" ? (v as FindScannedFn) : undefined;
@@ -387,7 +402,7 @@ function asFindScanLike(v: unknown): FindScanLike | undefined {
 }
 type SearchCore = NonNullable<FindToolsDeps["search"]>;
 /** One find round: ranked paths plus scan metadata when the core exposes findScanned. */
-async function runFind(search: SearchCore, query: string, opts: { cwd?: string; limit: number; offset: number }): Promise<{ paths: string[]; scanned?: number; backend?: string }> {
+async function runFind(search: SearchCore, query: string, opts: { cwd?: string; limit: number; offset: number; scope?: string }): Promise<{ paths: string[]; scanned?: number; backend?: string }> {
   const detailed = "findScanned" in search ? asFindScanned(search.findScanned) : undefined;
   if (detailed !== undefined) {
     const like = asFindScanLike(await detailed(query, opts));
@@ -452,7 +467,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
       let statBackend: string | undefined = undefined;
       let statTimeout = false;
       try {
-        let query: string, limit: number, offset: number, cwd: string | undefined, maxChars: number | undefined, concise: boolean;
+        let query: string, limit: number, offset: number, cwd: string | undefined, maxChars: number | undefined, concise: boolean, scope: string | undefined;
         let all: string[];
         let relaxed: { from: string; to: string } | undefined;
         let scanned: number | undefined, backend: string | undefined;
@@ -461,9 +476,9 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         if (cursorId) {
           const st = cursors.get(cursorId);
           if (!st || st.kind !== "find") return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
-          query = st.query; limit = st.limit; offset = st.nextOffset; cwd = st.cwd; maxChars = st.maxChars; concise = st.concise === true;
+          query = st.query; limit = st.limit; offset = st.nextOffset; cwd = st.cwd; scope = st.scope; maxChars = st.maxChars; concise = st.concise === true;
           bound = { total: st.total, backend: st.backend };
-          const live = await runFind(search, query, { cwd, limit: PAGE_MAX, offset: 0 });
+          const live = await runFind(search, query, scope === undefined ? { cwd, limit: PAGE_MAX, offset: 0 } : { cwd, limit: PAGE_MAX, offset: 0, scope });
           all = live.paths; scanned = live.scanned; backend = live.backend;
         } else {
           const pattern = strParam(params, "pattern") ?? "";
@@ -473,15 +488,16 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           limit = numParam(params, "limit") ?? FIND_PAGE;
           offset = 0;
           cwd = cwdParam(params);
+          scope = scopePin(dirParam);
           maxChars = charsParam(params, "maxChars"); concise = params["concise"] === true;
-          let fetched = await runFind(search, query, { cwd, limit: PAGE_MAX, offset: 0 });
+          let fetched = await runFind(search, query, scope === undefined ? { cwd, limit: PAGE_MAX, offset: 0 } : { cwd, limit: PAGE_MAX, offset: 0, scope });
           scanned = fetched.scanned; backend = fetched.backend;
           const words = pattern.trim().split(/\s+/).filter(Boolean);
           if (fetched.paths.length === 0 && words.length >= 3) {
             // One auto-retry with the first 2 terms (fff find_files behavior); the
             // directory constraint is preserved, only the fuzzy tail is shortened.
             const shorter = [dirParam, words.slice(0, 2).join(" ")].filter(Boolean).join(" ");
-            fetched = await runFind(search, shorter, { cwd, limit: PAGE_MAX, offset: 0 });
+            fetched = await runFind(search, shorter, scope === undefined ? { cwd, limit: PAGE_MAX, offset: 0 } : { cwd, limit: PAGE_MAX, offset: 0, scope });
             scanned = fetched.scanned ?? scanned; backend = fetched.backend ?? backend;
             relaxed = { from: query, to: shorter };
             query = shorter;
@@ -507,7 +523,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const hasMore = offset + page.length < total;
         const details = { totalMatched: total, totalFiles: scanned ?? total, truncated: hasMore };
         if (hasMore) {
-          const next = storeCursor({ kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars, concise, total, backend });
+          const next = storeCursor(scope === undefined ? { kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars, concise, total, backend } : { kind: "find", query, limit, nextOffset: offset + page.length, cwd, scope, maxChars, concise, total, backend });
           lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
         }
         if (lines.length === 0) return withDetails(zeroFind(scanned, backend, relaxed), { totalMatched: 0, totalFiles: scanned ?? 0, truncated: false });
@@ -557,7 +573,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
       let statBackend: string | undefined = undefined;
       let statTimeout = false;
       try {
-        let pattern: string, literal: boolean, ignoreCase: boolean, wholeWord: boolean, smartCase: boolean, pathFilter: string | undefined;
+        let pattern: string, literal: boolean, ignoreCase: boolean, wholeWord: boolean, smartCase: boolean, pathFilter: string | undefined, scope: string | undefined;
         let limit: number, offset: number, cwd: string | undefined;
         let contextBefore: number, contextAfter: number, expand: "none" | "function", maxChars: number | undefined, concise: boolean;
         const cursorId = strParam(params, "cursor");
@@ -567,7 +583,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           if (!st || st.kind !== "grep") return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
           pattern = st.pattern; literal = st.literal; ignoreCase = st.ignoreCase;
           wholeWord = st.wholeWord; smartCase = st.smartCase;
-          pathFilter = st.pathFilter; limit = st.limit; offset = st.nextOffset; cwd = st.cwd;
+          pathFilter = st.pathFilter; scope = st.scope ?? scopePin(st.pathFilter); limit = st.limit; offset = st.nextOffset; cwd = st.cwd;
           contextBefore = st.contextBefore; contextAfter = st.contextAfter; expand = st.expand === "function" ? "function" : "none"; maxChars = st.maxChars; concise = st.concise === true;
           bound = { total: st.total, backend: st.backend };
         } else {
@@ -578,7 +594,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           ignoreCase = params["ignoreCase"] === true;
           wholeWord = params["wholeWord"] === true;
           smartCase = params["smartCase"] === true;
-          pathFilter = strParam(params, "path");
+          pathFilter = strParam(params, "path"); scope = scopePin(pathFilter);
           limit = numParam(params, "limit") ?? GREP_PAGE;
           offset = 0;
           cwd = cwdParam(params);
@@ -597,7 +613,11 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         if (!concise && contextBefore > 0) pageOpts.contextBefore = contextBefore;
         if (!concise && contextAfter > 0) pageOpts.contextAfter = contextAfter;
         if (!concise && expand === "function") pageOpts.expand = expand;
-        const res = await search.grepContents(pattern, pathFilter ? { cwd, literal, ignoreCase, wholeWord, smartCase } : pageOpts);
+        // Explicit pins additionally scope the backend: rg receives the pin as
+        // its positional path (hidden/ignored files included) and the walker
+        // seeds traversal at the pin; the post-filter below still applies, so
+        // glob/bare-basename forms and totals render exactly as before.
+        const res = await search.grepContents(pattern, pathFilter ? (scope === undefined ? { cwd, literal, ignoreCase, wholeWord, smartCase } : { cwd, literal, ignoreCase, wholeWord, smartCase, scope }) : pageOpts);
         const pool = pathFilter ? applyPathFilter(res.matches.map((m) => m.path), pathFilter, search.globToRegExp) : null;
         const matches = pool === null ? res.matches : res.matches.filter((m) => pool.includes(m.path));
         const total = pool === null ? res.total : matches.length;
@@ -646,8 +666,10 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const hasMore = offset + page.length < total;
         const details = { totalMatched: total, totalFiles: new Set(matches.map((m) => m.path)).size, truncated: hasMore };
         if (hasMore) {
-          const next = storeCursor({
+          const next = storeCursor(scope === undefined ? {
             kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
+          } : {
+            kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, scope, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
           });
           lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
         }

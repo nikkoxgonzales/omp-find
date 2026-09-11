@@ -109,7 +109,23 @@ function checkDeadline(deadline, timeoutMs) {
     if (deadline > 0 && Date.now() > deadline)
         throw new Error(`grep timed out after ${timeoutMs / 1000}s`);
 }
-async function walkFiles(cwd, follow, deadline = 0, timeoutMs = 0) {
+/** Explicit-pin scope: workspace-relative path forwarded from the tools layer
+ * (concrete `dir/` or `dir/file` pins only — never globs or bare basenames).
+ * Normalized here so every backend treats the same pin the same way: leading
+ * `./` and trailing slashes stripped, backslashes unified, absolute paths and
+ * `..` escapes rejected (undefined = no scope, today's full-tree scan). */
+function normalizeScope(scope) {
+    if (!scope)
+        return undefined;
+    const noDot = scope.replace(/\\/g, "/").startsWith("./") ? scope.replace(/\\/g, "/").slice(2) : scope.replace(/\\/g, "/");
+    const segs = noDot.split("/").filter(Boolean);
+    if (segs.length === 0 || segs.includes(".."))
+        return undefined;
+    if (/^[A-Za-z]:$/.test(segs[0]) || noDot.startsWith("/"))
+        return undefined;
+    return segs.join("/");
+}
+async function walkFiles(cwd, follow, deadline = 0, timeoutMs = 0, scope) {
     const out = [];
     async function walk(dir, rel, depth) {
         if (depth > MAX_DEPTH)
@@ -143,13 +159,40 @@ async function walkFiles(cwd, follow, deadline = 0, timeoutMs = 0) {
                 out.push(relPath);
         }
     }
+    const root = normalizeScope(scope);
+    if (root !== undefined) {
+        // The explicitly requested root bypasses the dot-dir prune above (that
+        // guard still applies to every directory met *under* the root); a pinned
+        // file resolves to itself without any traversal.
+        const abs = path.join(cwd, ...root.split("/"));
+        let st;
+        try {
+            st = await fs.stat(abs);
+        }
+        catch {
+            return out;
+        }
+        if (st.isFile()) {
+            out.push(root);
+            return out;
+        }
+        if (st.isDirectory()) {
+            await walk(root.split("/").join(path.sep), root, 0);
+            return out;
+        }
+        return out;
+    }
     await walk(".", "", 0);
     return out;
 }
-async function listFiles(cwd, scan, follow) {
+async function listFiles(cwd, scan, follow, scope) {
+    const root = normalizeScope(scope);
     if (scan !== "mock") {
         try {
-            const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow", "."], cwd);
+            // A pinned path replaces "." positionally: rg searches an explicit file
+            // or dir even when hidden/ignored, while unpinned calls keep today's
+            // argv ("." root, no blanket --hidden/--no-ignore) byte-identical.
+            const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow", root === undefined ? "." : toNative(root)], cwd);
             return { files: stdout.split("\n").map((l) => stripDotSlash(l.trim().replace(/\\/g, "/"))).filter(Boolean), backend: "rg" };
         }
         catch (err) {
@@ -157,7 +200,7 @@ async function listFiles(cwd, scan, follow) {
                 throw err;
         }
     }
-    return { files: await walkFiles(cwd, follow), backend: "walker" };
+    return { files: await walkFiles(cwd, follow, 0, 0, root), backend: "walker" };
 }
 /** Fresh `git status --porcelain` per call; null when git fails (not a repo). */
 async function gitModifiedSet(cwd) {
@@ -239,7 +282,7 @@ export async function findScanned(query, opts = {}) {
     const cwd = path.resolve(opts.cwd ?? process.cwd());
     guardCwd(cwd);
     const q = parseFindQuery(query);
-    const { files, backend } = await listFiles(cwd, opts.scan, opts.followSymlinks ?? false);
+    const { files, backend } = await listFiles(cwd, opts.scan, opts.followSymlinks ?? false, opts.scope);
     let modified = null;
     if (q.gitModifiedOnly) {
         modified = await gitModifiedSet(cwd);
@@ -260,7 +303,7 @@ export async function findPaths(query, opts = {}) {
     const scan = await findScanned(query, opts);
     return pageOf(scan.paths, opts.limit, opts.offset);
 }
-async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord = false) {
+async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord = false, scope) {
     const args = ["--vimgrep", "--no-heading", "--no-messages", "--max-columns", "500", "--max-filesize", MAX_GREP_SIZE, follow ? "--follow" : "--no-follow"];
     if (literal)
         args.push("--fixed-strings");
@@ -268,7 +311,8 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, whol
         args.push("--ignore-case");
     if (wholeWord)
         args.push("--word-regexp"); // composes with --fixed-strings: literal whole words, no regex needed
-    args.push("--", pattern, ".");
+    const root = normalizeScope(scope);
+    args.push("--", pattern, root === undefined ? "." : toNative(root));
     const out = [];
     for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split(/\r?\n/)) {
         if (!line)
@@ -279,7 +323,7 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, whol
     }
     return out;
 }
-async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline = 0, timeoutMs = 0, wholeWord = false) {
+async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline = 0, timeoutMs = 0, wholeWord = false, scope) {
     let re = null;
     if (!literal || wholeWord) {
         // Whole words need a regex even for literal patterns (escape first, then
@@ -294,7 +338,7 @@ async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline 
     }
     const needle = ignoreCase ? pattern.toLowerCase() : pattern;
     const out = [];
-    for (const f of await walkFiles(cwd, follow, deadline, timeoutMs)) {
+    for (const f of await walkFiles(cwd, follow, deadline, timeoutMs, scope)) {
         checkDeadline(deadline, timeoutMs); // per file batch: abort the orphaned scan between reads
         let text;
         try {
@@ -432,18 +476,18 @@ export async function grepContents(pattern, opts = {}) {
         let matches;
         let backend;
         if (opts.scan === "mock") {
-            matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord);
+            matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord, opts.scope);
             backend = "walker";
         }
         else {
             try {
-                matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord);
+                matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord, opts.scope);
                 backend = "rg";
             }
             catch (err) {
                 if (errCode(err) !== "ENOENT")
                     throw err;
-                matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord);
+                matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord, opts.scope);
                 backend = "walker";
             }
         }

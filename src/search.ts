@@ -11,8 +11,8 @@ const MAX_GREP_BYTES = 2 * 1024 * 1024, MAX_GREP_SIZE = "2M";
 /** Default wall-clock budget for one grep call (overridable via GrepOptions.timeoutMs). */
 const GREP_TIMEOUT_DEFAULT = 30000;
 export interface ParsedFindQuery { fuzzy: string; dirPrefix?: string; extGlobs: string[]; excludes: string[]; gitModifiedOnly: boolean }
-export interface FindOptions { cwd?: string; limit?: number; offset?: number; scan?: string; followSymlinks?: boolean }
-export interface GrepOptions { cwd?: string; limit?: number; offset?: number; literal?: boolean; ignoreCase?: boolean; wholeWord?: boolean; smartCase?: boolean; scan?: string; followSymlinks?: boolean; timeoutMs?: number; contextBefore?: number; contextAfter?: number; expand?: "none" | "function" }
+export interface FindOptions { cwd?: string; limit?: number; offset?: number; scan?: string; followSymlinks?: boolean; scope?: string }
+export interface GrepOptions { cwd?: string; limit?: number; offset?: number; literal?: boolean; ignoreCase?: boolean; wholeWord?: boolean; smartCase?: boolean; scan?: string; followSymlinks?: boolean; timeoutMs?: number; contextBefore?: number; contextAfter?: number; expand?: "none" | "function"; scope?: string }
 export interface GrepMatch { path: string; line: number; col: number; text: string; before?: string[]; after?: string[]; enclosing?: { kind: string; name: string; line: number }; depth?: number; via?: string }
 export interface GrepResult { matches: GrepMatch[]; total: number; backend: ScanBackend }
 /** Which listing/grep backend served a call: rg when on PATH, otherwise the builtin walker. */
@@ -80,7 +80,20 @@ after the budget (rg is kill-guarded; the walker is not). Throws timeout text. *
 function checkDeadline(deadline: number, timeoutMs: number): void {
   if (deadline > 0 && Date.now() > deadline) throw new Error(`grep timed out after ${timeoutMs / 1000}s`);
 }
-async function walkFiles(cwd: string, follow: boolean, deadline = 0, timeoutMs = 0): Promise<string[]> {
+/** Explicit-pin scope: workspace-relative path forwarded from the tools layer
+ * (concrete `dir/` or `dir/file` pins only — never globs or bare basenames).
+ * Normalized here so every backend treats the same pin the same way: leading
+ * `./` and trailing slashes stripped, backslashes unified, absolute paths and
+ * `..` escapes rejected (undefined = no scope, today's full-tree scan). */
+function normalizeScope(scope: string | undefined): string | undefined {
+  if (!scope) return undefined;
+  const noDot = scope.replace(/\\/g, "/").startsWith("./") ? scope.replace(/\\/g, "/").slice(2) : scope.replace(/\\/g, "/");
+  const segs = noDot.split("/").filter(Boolean);
+  if (segs.length === 0 || segs.includes("..")) return undefined;
+  if (/^[A-Za-z]:$/.test(segs[0]) || noDot.startsWith("/")) return undefined;
+  return segs.join("/");
+}
+async function walkFiles(cwd: string, follow: boolean, deadline = 0, timeoutMs = 0, scope?: string): Promise<string[]> {
   const out: string[] = [];
   async function walk(dir: string, rel: string, depth: number): Promise<void> {
     if (depth > MAX_DEPTH) return;
@@ -98,17 +111,33 @@ async function walkFiles(cwd: string, follow: boolean, deadline = 0, timeoutMs =
       else out.push(relPath);
     }
   }
+  const root = normalizeScope(scope);
+  if (root !== undefined) {
+    // The explicitly requested root bypasses the dot-dir prune above (that
+    // guard still applies to every directory met *under* the root); a pinned
+    // file resolves to itself without any traversal.
+    const abs = path.join(cwd, ...root.split("/"));
+    let st;
+    try { st = await fs.stat(abs); } catch { return out; }
+    if (st.isFile()) { out.push(root); return out; }
+    if (st.isDirectory()) { await walk(root.split("/").join(path.sep), root, 0); return out; }
+    return out;
+  }
   await walk(".", "", 0);
   return out;
 }
-async function listFiles(cwd: string, scan: string | undefined, follow: boolean): Promise<{ files: string[]; backend: ScanBackend }> {
+async function listFiles(cwd: string, scan: string | undefined, follow: boolean, scope?: string): Promise<{ files: string[]; backend: ScanBackend }> {
+  const root = normalizeScope(scope);
   if (scan !== "mock") {
     try {
-      const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow", "."], cwd);
+      // A pinned path replaces "." positionally: rg searches an explicit file
+      // or dir even when hidden/ignored, while unpinned calls keep today's
+      // argv ("." root, no blanket --hidden/--no-ignore) byte-identical.
+      const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow", root === undefined ? "." : toNative(root)], cwd);
       return { files: stdout.split("\n").map((l) => stripDotSlash(l.trim().replace(/\\/g, "/"))).filter(Boolean), backend: "rg" };
     } catch (err) { if (errCode(err) !== "ENOENT") throw err; }
   }
-  return { files: await walkFiles(cwd, follow), backend: "walker" };
+  return { files: await walkFiles(cwd, follow, 0, 0, root), backend: "walker" };
 }
 /** Fresh `git status --porcelain` per call; null when git fails (not a repo). */
 async function gitModifiedSet(cwd: string): Promise<Set<string> | null> {
@@ -168,7 +197,7 @@ export async function findScanned(query: string, opts: FindOptions = {}): Promis
   const cwd = path.resolve(opts.cwd ?? process.cwd());
   guardCwd(cwd);
   const q = parseFindQuery(query);
-  const { files, backend } = await listFiles(cwd, opts.scan, opts.followSymlinks ?? false);
+  const { files, backend } = await listFiles(cwd, opts.scan, opts.followSymlinks ?? false, opts.scope);
   let modified: Set<string> | null = null;
   if (q.gitModifiedOnly) {
     modified = await gitModifiedSet(cwd);
@@ -187,12 +216,13 @@ export async function findPaths(query: string, opts: FindOptions = {}): Promise<
   const scan = await findScanned(query, opts);
   return pageOf(scan.paths, opts.limit, opts.offset);
 }
-async function rgGrep(cwd: string, pattern: string, literal: boolean, ignoreCase: boolean, follow: boolean, timeoutMs: number, wholeWord = false): Promise<GrepMatch[]> {
+async function rgGrep(cwd: string, pattern: string, literal: boolean, ignoreCase: boolean, follow: boolean, timeoutMs: number, wholeWord = false, scope?: string): Promise<GrepMatch[]> {
   const args = ["--vimgrep", "--no-heading", "--no-messages", "--max-columns", "500", "--max-filesize", MAX_GREP_SIZE, follow ? "--follow" : "--no-follow"];
   if (literal) args.push("--fixed-strings");
   if (ignoreCase) args.push("--ignore-case");
   if (wholeWord) args.push("--word-regexp"); // composes with --fixed-strings: literal whole words, no regex needed
-  args.push("--", pattern, ".");
+  const root = normalizeScope(scope);
+  args.push("--", pattern, root === undefined ? "." : toNative(root));
   const out: GrepMatch[] = [];
   for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split(/\r?\n/)) {
     if (!line) continue;
@@ -201,7 +231,7 @@ async function rgGrep(cwd: string, pattern: string, literal: boolean, ignoreCase
   }
   return out;
 }
-async function fallbackGrep(cwd: string, pattern: string, literal: boolean, ignoreCase: boolean, follow: boolean, deadline = 0, timeoutMs = 0, wholeWord = false): Promise<GrepMatch[]> {
+async function fallbackGrep(cwd: string, pattern: string, literal: boolean, ignoreCase: boolean, follow: boolean, deadline = 0, timeoutMs = 0, wholeWord = false, scope?: string): Promise<GrepMatch[]> {
   let re: RegExp | null = null;
   if (!literal || wholeWord) {
     // Whole words need a regex even for literal patterns (escape first, then
@@ -211,7 +241,7 @@ async function fallbackGrep(cwd: string, pattern: string, literal: boolean, igno
   }
   const needle = ignoreCase ? pattern.toLowerCase() : pattern;
   const out: GrepMatch[] = [];
-  for (const f of await walkFiles(cwd, follow, deadline, timeoutMs)) {
+  for (const f of await walkFiles(cwd, follow, deadline, timeoutMs, scope)) {
     checkDeadline(deadline, timeoutMs); // per file batch: abort the orphaned scan between reads
     let text: string;
     try {
@@ -312,12 +342,12 @@ export async function grepContents(pattern: string, opts: GrepOptions = {}): Pro
   const run = (async (): Promise<GrepResult> => {
     let matches: GrepMatch[];
     let backend: ScanBackend;
-    if (opts.scan === "mock") { matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord); backend = "walker"; }
+    if (opts.scan === "mock") { matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord, opts.scope); backend = "walker"; }
     else {
-      try { matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord); backend = "rg"; }
+      try { matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord, opts.scope); backend = "rg"; }
       catch (err) {
         if (errCode(err) !== "ENOENT") throw err;
-        matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord); backend = "walker";
+        matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord, opts.scope); backend = "walker";
       }
     }
     return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend };

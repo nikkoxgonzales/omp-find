@@ -157,7 +157,9 @@ describe('grepContents bounds (needs core)', () => {
         );
       } finally {
         process.env.PATH = oldPath;
-        await rm(root, { recursive: true, force: true });
+        // The killed stub rg.exe can still hold its own image file for a beat on
+        // Windows; force:true does not cover EBUSY, so let fs.rm retry the lock out.
+        await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       }
     } else {
       // POSIX: a fifo with no writer blocks the fallback reader; we open the

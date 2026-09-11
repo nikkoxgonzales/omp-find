@@ -317,6 +317,25 @@ function applyPathFilter(paths, filter, glob) {
         return d === f || d.startsWith(`${f}/`) || d.slice(d.lastIndexOf("/") + 1) === f;
     });
 }
+/** Explicit-pin detector for the `path` filter: a concrete `dir/` or
+ * `dir/file` pin (contains a slash, no glob magic) is forwarded to the core
+ * as a backend scope so rg/walker search it directly — hidden/ignored files
+ * included. Glob (`*.py`) and bare-basename (`file.py`) forms return
+ * undefined and keep today's multi-directory post-filter. */
+function scopePin(filter) {
+    if (!filter)
+        return undefined;
+    const flat = filter.replace(/\\/g, "/");
+    const f = flat.startsWith("./") ? flat.slice(2) : flat;
+    if (!f.includes("/"))
+        return undefined;
+    if (/[*?[{]/.test(f))
+        return undefined;
+    const segs = f.split("/").filter(Boolean);
+    if (segs.length === 0 || segs.includes(".."))
+        return undefined;
+    return segs.join("/");
+}
 function ctxParam(params, key) {
     const v = params[key];
     if (typeof v !== "number" || !Number.isFinite(v))
@@ -443,7 +462,7 @@ export function registerFindTools(pi, deps, opts = {}) {
             let statBackend = undefined;
             let statTimeout = false;
             try {
-                let query, limit, offset, cwd, maxChars, concise;
+                let query, limit, offset, cwd, maxChars, concise, scope;
                 let all;
                 let relaxed;
                 let scanned, backend;
@@ -457,10 +476,11 @@ export function registerFindTools(pi, deps, opts = {}) {
                     limit = st.limit;
                     offset = st.nextOffset;
                     cwd = st.cwd;
+                    scope = st.scope;
                     maxChars = st.maxChars;
                     concise = st.concise === true;
                     bound = { total: st.total, backend: st.backend };
-                    const live = await runFind(search, query, { cwd, limit: PAGE_MAX, offset: 0 });
+                    const live = await runFind(search, query, scope === undefined ? { cwd, limit: PAGE_MAX, offset: 0 } : { cwd, limit: PAGE_MAX, offset: 0, scope });
                     all = live.paths;
                     scanned = live.scanned;
                     backend = live.backend;
@@ -474,9 +494,10 @@ export function registerFindTools(pi, deps, opts = {}) {
                     limit = numParam(params, "limit") ?? FIND_PAGE;
                     offset = 0;
                     cwd = cwdParam(params);
+                    scope = scopePin(dirParam);
                     maxChars = charsParam(params, "maxChars");
                     concise = params["concise"] === true;
-                    let fetched = await runFind(search, query, { cwd, limit: PAGE_MAX, offset: 0 });
+                    let fetched = await runFind(search, query, scope === undefined ? { cwd, limit: PAGE_MAX, offset: 0 } : { cwd, limit: PAGE_MAX, offset: 0, scope });
                     scanned = fetched.scanned;
                     backend = fetched.backend;
                     const words = pattern.trim().split(/\s+/).filter(Boolean);
@@ -484,7 +505,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                         // One auto-retry with the first 2 terms (fff find_files behavior); the
                         // directory constraint is preserved, only the fuzzy tail is shortened.
                         const shorter = [dirParam, words.slice(0, 2).join(" ")].filter(Boolean).join(" ");
-                        fetched = await runFind(search, shorter, { cwd, limit: PAGE_MAX, offset: 0 });
+                        fetched = await runFind(search, shorter, scope === undefined ? { cwd, limit: PAGE_MAX, offset: 0 } : { cwd, limit: PAGE_MAX, offset: 0, scope });
                         scanned = fetched.scanned ?? scanned;
                         backend = fetched.backend ?? backend;
                         relaxed = { from: query, to: shorter };
@@ -512,7 +533,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 const hasMore = offset + page.length < total;
                 const details = { totalMatched: total, totalFiles: scanned ?? total, truncated: hasMore };
                 if (hasMore) {
-                    const next = storeCursor({ kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars, concise, total, backend });
+                    const next = storeCursor(scope === undefined ? { kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars, concise, total, backend } : { kind: "find", query, limit, nextOffset: offset + page.length, cwd, scope, maxChars, concise, total, backend });
                     lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
                 if (lines.length === 0)
@@ -568,7 +589,7 @@ export function registerFindTools(pi, deps, opts = {}) {
             let statBackend = undefined;
             let statTimeout = false;
             try {
-                let pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter;
+                let pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, scope;
                 let limit, offset, cwd;
                 let contextBefore, contextAfter, expand, maxChars, concise;
                 const cursorId = strParam(params, "cursor");
@@ -583,6 +604,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     wholeWord = st.wholeWord;
                     smartCase = st.smartCase;
                     pathFilter = st.pathFilter;
+                    scope = st.scope ?? scopePin(st.pathFilter);
                     limit = st.limit;
                     offset = st.nextOffset;
                     cwd = st.cwd;
@@ -603,6 +625,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     wholeWord = params["wholeWord"] === true;
                     smartCase = params["smartCase"] === true;
                     pathFilter = strParam(params, "path");
+                    scope = scopePin(pathFilter);
                     limit = numParam(params, "limit") ?? GREP_PAGE;
                     offset = 0;
                     cwd = cwdParam(params);
@@ -624,7 +647,11 @@ export function registerFindTools(pi, deps, opts = {}) {
                     pageOpts.contextAfter = contextAfter;
                 if (!concise && expand === "function")
                     pageOpts.expand = expand;
-                const res = await search.grepContents(pattern, pathFilter ? { cwd, literal, ignoreCase, wholeWord, smartCase } : pageOpts);
+                // Explicit pins additionally scope the backend: rg receives the pin as
+                // its positional path (hidden/ignored files included) and the walker
+                // seeds traversal at the pin; the post-filter below still applies, so
+                // glob/bare-basename forms and totals render exactly as before.
+                const res = await search.grepContents(pattern, pathFilter ? (scope === undefined ? { cwd, literal, ignoreCase, wholeWord, smartCase } : { cwd, literal, ignoreCase, wholeWord, smartCase, scope }) : pageOpts);
                 const pool = pathFilter ? applyPathFilter(res.matches.map((m) => m.path), pathFilter, search.globToRegExp) : null;
                 const matches = pool === null ? res.matches : res.matches.filter((m) => pool.includes(m.path));
                 const total = pool === null ? res.total : matches.length;
@@ -678,8 +705,10 @@ export function registerFindTools(pi, deps, opts = {}) {
                 const hasMore = offset + page.length < total;
                 const details = { totalMatched: total, totalFiles: new Set(matches.map((m) => m.path)).size, truncated: hasMore };
                 if (hasMore) {
-                    const next = storeCursor({
+                    const next = storeCursor(scope === undefined ? {
                         kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
+                    } : {
+                        kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, scope, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
                     });
                     lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
