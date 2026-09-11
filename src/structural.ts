@@ -157,34 +157,67 @@ export function compileStructural(pattern: string, opts: { language?: string } =
     }
     const sep = tag === "inside" ? ">>" : "<<";
     const at = rest.indexOf(sep);
-    if (at < 0) throw new Error(`${tag}: needs "OUTER ${sep} INNER" (e.g. '${tag}: import ${sep} $X')`);
+    if (at < 0) {
+      if (/^(?:inside|has):/.test(rest)) throw new Error(`${tag}: combinators cannot be chained — got "${rest}"`);
+      throw new Error(`${tag}: needs "OUTER ${sep} INNER" (e.g. '${tag}: import ${sep} $X')`);
+    }
     const left = rest.slice(0, at).trim();
     const right = rest.slice(at + sep.length).trim();
     if (!left || !right) throw new Error(`${tag}: needs non-empty OUTER and INNER around "${sep}"`);
-    // Operands are plain patterns — a combinator prefix here means the user
-    // chained combinators (`inside: inside: x >> y`), which used to compile
-    // the prefix as literal text and silently match nothing.
-    if (/^(?:kind|symbol|references|inside|has):/.test(left) || /^(?:kind|symbol|references|inside|has):/.test(right)) {
-      throw new Error(`${tag}: combinators cannot be chained — operands must be plain patterns (got "${left}" ${sep} "${right}")`);
+    // Chained combinators: an operand that itself starts with `inside:` or `has:`
+    // is nesting a combinator, which would silently match nothing. `kind:`,
+    // `symbol:`, and `references:` are acceptable as the actual pattern content.
+    if (/^(?:inside|has):/.test(left) || /^(?:inside|has):/.test(right)) {
+      throw new Error(`${tag}: combinators cannot be chained — operands must not be combinators (got "${left}" ${sep} "${right}")`);
+    }
+    function parseSide(side: "outer" | "inner" | "target" | "filter", raw: string, into: string[]): { source: string; backref: boolean; references?: string } {
+      const m = /^(kind|symbol|references):\s*/.exec(raw);
+      if (!m) {
+        const t = tokenize(raw, into);
+        assertNotMatchAll(t.source, raw);
+        return { source: t.source, backref: t.backref };
+      }
+      const sub = m[1];
+      const arg = raw.slice(m[0].length).trim();
+      if (sub === "kind") {
+        if (!arg || /\s/.test(arg)) throw new Error(`kind: takes one bare kind (supported: ${Object.keys(KIND_PATTERNS).join(", ")}) — combine with a name via inside: or a $VAR pattern`);
+        const base = Object.hasOwn(KIND_PATTERNS, arg) ? KIND_PATTERNS[arg] : undefined;
+        if (!base) throw new Error(`unknown structural kind "${arg}" (supported: ${Object.keys(KIND_PATTERNS).join(", ")})`);
+        assertNotMatchAll(base, raw);
+        return { source: base, backref: false };
+      }
+      if (sub === "symbol") {
+        if (!arg) throw new Error(`symbol: needs a name (e.g. 'symbol: parseFindQuery')`);
+        const r = defPattern(arg);
+        assertNotMatchAll(r, raw);
+        return { source: r, backref: false };
+      }
+      if (sub === "references") {
+        if (!arg) throw new Error(`references: needs a name (e.g. 'references: parseFindQuery')`);
+        return { source: "", backref: false, references: arg };
+      }
+      throw new Error(`${tag}: ${side} operand cannot use an unknown prefix`);
     }
     if (tag === "inside") {
-      const outerT = tokenize(left, []);
-      const innerT = tokenize(right, groups);
-      assertNotMatchAll(innerT.source, raw);
+      const outerT = parseSide("outer", left, []);
+      const innerT = parseSide("inner", right, groups);
+      if (outerT.references) throw new Error(`${tag}: outer operand cannot be references:`);
       return {
         source: raw, regex: innerT.source, groups, language, mode: "inside",
         outer: { regex: outerT.source, description: `outer "${left}"` },
         hasBackref: innerT.backref || outerT.backref,
+        symbolName: innerT.references,
         description: `structural inside: "${left}" >> "${right}" [${language}] → inner matches in files containing outer (file-scoped, not AST containment)`,
       };
     }
-    const targetT = tokenize(left, groups);
-    const filterT = tokenize(right, []);
-    assertNotMatchAll(targetT.source, raw);
+    const targetT = parseSide("target", left, groups);
+    const filterT = parseSide("filter", right, []);
+    if (filterT.references) throw new Error(`${tag}: filter operand cannot be references:`);
     return {
       source: raw, regex: targetT.source, groups, language, mode: "has",
       outer: { regex: filterT.source, description: `filter "${right}"` },
       hasBackref: targetT.backref || filterT.backref,
+      symbolName: targetT.references,
       description: `structural has: "${left}" << "${right}" [${language}] → outer matches in files containing the filter (file-scoped, not AST containment)`,
     };
   }
@@ -202,12 +235,17 @@ export async function structuralGrep(pattern: string, opts: StructuralOptions = 
   // Context keys only travel when set: absence keeps the core call identical.
   if ((opts.contextBefore ?? 0) > 0) base.contextBefore = opts.contextBefore;
   if ((opts.contextAfter ?? 0) > 0) base.contextAfter = opts.contextAfter;
-  if (compiled.mode === "references") {
+  const scan = compiled.hasBackref ? "mock" : opts.scan;
+  if (compiled.mode === "references" || compiled.symbolName) {
     const r = await callersOf(compiled.symbolName ?? "", { ...base, limit: opts.limit, offset: opts.offset });
+    if (compiled.outer) {
+      const outerRes = await grepContents(compiled.outer.regex, { ...base, scan, literal: false });
+      const files = new Set(outerRes.matches.map((m) => m.path));
+      const matches = r.matches.filter((m) => files.has(m.path));
+      return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend: r.backend, capped: r.capped };
+    }
     return r;
   }
-  // rg (Rust regex) has no backreferences; the walker honors them.
-  const scan = compiled.hasBackref ? "mock" : opts.scan;
   if (compiled.outer) {
     const outerRes = await grepContents(compiled.outer.regex, { ...base, scan, literal: false });
     const files = new Set(outerRes.matches.map((m) => m.path));

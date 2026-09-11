@@ -52,6 +52,10 @@ const CPP = [
 const GENERIC = [
     { re: new RegExp(`^(?:(?:public|private|protected|internal|sealed|open|data|abstract|final|static|export|async)\\s+)*(class|function|def|fn|func|interface|enum|struct|type)\\s+(${WORD})`), kind: "", nameIdx: 2 },
 ];
+const MD = [
+    { re: new RegExp(`^#{1,6}\\s+(${WORD})`), kind: "heading", nameIdx: 1 },
+    { re: new RegExp(`^(?:[-*]|\\d+\\.)\\s+(${WORD})`), kind: "list", nameIdx: 1, heuristic: true },
+];
 /** Method-name blocklist: control-flow/calls that mimic a signature. Applied
  * only to `heuristic` rules (name captured by shape, not anchored on a
  * keyword) — keyword-anchored rules legitimately declare names like Rust's
@@ -89,6 +93,7 @@ function rulesFor(ext) {
         case ".cpp":
         case ".cxx":
         case ".hpp": return CPP;
+        case ".md": return [...MD, ...GENERIC];
         default: return GENERIC;
     }
 }
@@ -124,7 +129,8 @@ export async function outlineFile(file, opts = {}) {
     }
     if (raw.length > MAX_OUTLINE_BYTES || raw.indexOf(0) >= 0)
         return { symbols: [], total: 0 };
-    const rules = rulesFor(path.extname(abs).toLowerCase());
+    const ext = path.extname(abs).toLowerCase();
+    const rules = rulesFor(ext);
     const lines = raw.toString("utf8").split("\n");
     const out = [];
     for (let i = 0; i < lines.length; i++) {
@@ -137,7 +143,7 @@ export async function outlineFile(file, opts = {}) {
         if (indent > 4)
             continue;
         const trimmed = line.trim();
-        if (!trimmed || isComment(trimmed))
+        if (!trimmed || (ext !== ".md" && isComment(trimmed)))
             continue;
         for (const rule of rules) {
             if (rule.nested && indent === 0)

@@ -397,10 +397,14 @@ function ctxParam(params, key) {
 }
 function charsParam(params, key) {
     const v = params[key];
-    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0)
+    if (v === undefined)
+        return undefined;
+    if (typeof v !== "number" || !Number.isFinite(v))
         return undefined;
     if (!Number.isInteger(v))
         throw new Error(`${key} must be an integer >= 1`);
+    if (v < 1)
+        throw new Error(`${key} must be >= 1`);
     return Math.min(v, 1000000);
 }
 /** Top-counts summary fragment: "b: 3, a: 1", at most 10 entries. */
@@ -897,8 +901,13 @@ export function registerFindTools(pi, deps, opts = {}) {
                 // depth is a 0|1 knob — a non-integer used to floor silently; reject it
                 // on both fresh calls and resumes (mirrors ffcallers' closed-set check).
                 const depthParam = params["depth"];
-                if (depthParam !== undefined && (typeof depthParam !== "number" || !Number.isInteger(depthParam))) {
-                    return text(`${toolName} failed: depth must be an integer`);
+                if (depthParam !== undefined) {
+                    if (typeof depthParam !== "number" || !Number.isInteger(depthParam)) {
+                        return text(`${toolName} failed: depth must be an integer`);
+                    }
+                    if (depthParam !== 0 && depthParam !== 1) {
+                        return text(`${toolName} failed: depth must be 0 or 1`);
+                    }
                 }
                 if (cursorId) {
                     const st = cursors.get(cursorId);
@@ -1238,7 +1247,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 let lines;
                 if (rewrite !== undefined) {
                     const compiled = search.compileStructural(query, { language });
-                    if (compiled.mode === "references")
+                    if (compiled.mode === "references" || compiled.symbolName)
                         return text(`${toolName} failed: rewrite preview needs pattern: or symbol:, not references:`);
                     lines = search.previewRewrite(compiled, rewrite, page.map((r) => r.m)).flatMap((b) => b.split("\n"));
                     if (lines.length > 0)
@@ -1297,6 +1306,7 @@ export function registerFindTools(pi, deps, opts = {}) {
             properties: {
                 path: { type: "string", description: "Dir-scope filter, e.g. 'src/' — map only this subtree" },
                 cwd: { type: "string", description: "Scan root: absolute directory to map (default: session cwd); refused for filesystem-root and home" },
+                limit: { type: "number", description: "Max files to show (default unlimited; fitted to maxChars)" },
                 maxChars: { type: "number", description: "Overview budget in chars (default 8000) — the file cutoff is fitted to it" },
             },
             additionalProperties: false,
@@ -1311,13 +1321,16 @@ export function registerFindTools(pi, deps, opts = {}) {
                 const cwd = cwdParam(params);
                 const scope = strictStrParam(params, "path");
                 const budget = charsParam(params, "maxChars") ?? 8000;
+                const limit = numParam(params, "limit");
                 const res = await search.rankMap({ cwd });
                 statBackend = res.backend;
                 const pool = scope ? applyPathFilter(res.files.map((f) => f.path), scope, search.globToRegExp) : null;
                 const files = pool === null ? res.files : res.files.filter((f) => pool.includes(f.path));
                 const ranked = await Promise.all(files.map(async (f) => ({ f, s: (await safeScore(frecency, f.path)) + (f.modified ? 1 : 0) + Math.log1p(f.inDegree) })));
                 ranked.sort((a, b) => b.s - a.s); // stable: frecency + git recency + centrality, path order otherwise
-                const shown = ranked.filter((r) => r.f.symbols.length > 0);
+                const cap = limit ?? files.length;
+                const limited = ranked.slice(0, cap);
+                const shown = limited.filter((r) => r.f.symbols.length > 0);
                 const blocks = shown.map((r) => [`${toDisplay(r.f.path)}:`, ...r.f.symbols.map((s) => `  ${s.kind} ${s.name}`)]);
                 // Binary-search the file cutoff to fit the budget (prefix sums over block sizes).
                 const sizes = [];

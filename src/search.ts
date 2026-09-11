@@ -628,6 +628,7 @@ async function directCallers(sym: string, base: { cwd?: string; ignoreCase: bool
   // `constructor(` is the one keyword-less def that can end at the open paren:
   // a bare `constructor(...)` statement is never a call (that's `super(`/`new X(`).
   const ctorDefRe = sym.toLowerCase() === "constructor" ? new RegExp(`^\\s*(?:(?:public|private|protected)\\s+)*${bound}\\s*\\(`, flags) : null;
+  const ctorBodyRe = sym.toLowerCase() === "constructor" ? new RegExp(`\\b${esc}\\s*\\([^)]*\\)\\s*\\{`, flags) : null;
   // rg's \b only sees \w, so `\bfoo\b\s*\(` matches inside `$foo(`/`foo$bar(` —
   // and the rg patterns can't use lookarounds (rg rejects them → walker for
   // every callers call). Post-filter instead: a row only survives when the
@@ -664,7 +665,7 @@ async function directCallers(sym: string, base: { cwd?: string; ignoreCase: bool
         const line = await fullLine(m);
         if (line === undefined || !v.test(line)) continue;
       }
-      if (defRe.test(m.text) || defRe2.test(m.text) || (ctorDefRe !== null && ctorDefRe.test(m.text))) continue;
+      if (defRe.test(m.text) || defRe2.test(m.text) || (ctorDefRe !== null && ctorDefRe.test(m.text)) || (ctorBodyRe !== null && ctorBodyRe.test(m.text))) continue;
       const key = `${m.path}:${m.line}`;
       if (seen.has(key)) continue;
       if (seen.size >= GREP_CAP) return { backend, fresh };

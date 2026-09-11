@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.10). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.11). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 

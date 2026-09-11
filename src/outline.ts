@@ -67,6 +67,10 @@ const CPP: Rule[] = [
 const GENERIC: Rule[] = [
   { re: new RegExp(`^(?:(?:public|private|protected|internal|sealed|open|data|abstract|final|static|export|async)\\s+)*(class|function|def|fn|func|interface|enum|struct|type)\\s+(${WORD})`), kind: "", nameIdx: 2 },
 ];
+const MD: Rule[] = [
+  { re: new RegExp(`^#{1,6}\\s+(${WORD})`), kind: "heading", nameIdx: 1 },
+  { re: new RegExp(`^(?:[-*]|\\d+\\.)\\s+(${WORD})`), kind: "list", nameIdx: 1, heuristic: true },
+];
 /** Method-name blocklist: control-flow/calls that mimic a signature. Applied
  * only to `heuristic` rules (name captured by shape, not anchored on a
  * keyword) — keyword-anchored rules legitimately declare names like Rust's
@@ -93,6 +97,7 @@ function rulesFor(ext: string): Rule[] {
     case ".rs": return RUST;
     case ".java": case ".cs": return JAVA;
     case ".c": case ".h": case ".cc": case ".cpp": case ".cxx": case ".hpp": return CPP;
+    case ".md": return [...MD, ...GENERIC];
     default: return GENERIC;
   }
 }
@@ -125,7 +130,8 @@ export async function outlineFile(file: string, opts: OutlineOptions = {}): Prom
     throw new Error(`outline: cannot read ${file} (${err instanceof Error ? err.message : String(err)})`);
   }
   if (raw.length > MAX_OUTLINE_BYTES || raw.indexOf(0) >= 0) return { symbols: [], total: 0 };
-  const rules = rulesFor(path.extname(abs).toLowerCase());
+  const ext = path.extname(abs).toLowerCase();
+  const rules = rulesFor(ext);
   const lines = raw.toString("utf8").split("\n");
   const out: OutlineSymbol[] = [];
   for (let i = 0; i < lines.length; i++) {
@@ -135,7 +141,7 @@ export async function outlineFile(file: string, opts: OutlineOptions = {}): Prom
     if (indent > 0 && depth === 0) continue;
     if (indent > 4) continue;
     const trimmed = line.trim();
-    if (!trimmed || isComment(trimmed)) continue;
+    if (!trimmed || (ext !== ".md" && isComment(trimmed))) continue;
     for (const rule of rules) {
       if (rule.nested && indent === 0) continue;
       const m = rule.re.exec(trimmed);

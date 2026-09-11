@@ -2,6 +2,15 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.11]
+
+### Fixed
+
+- `ffstructural` two-phase combinators (`inside:`/`has:`) now accept `kind:`, `symbol:`, and `references:` as the inner/outer operand instead of over-rejecting them as chained combinators — `inside: import >> kind:call` works again; only recursive `inside: inside:` / `has: ... << has:` are rejected.
+- `ffcallers` `constructor` no longer returns `constructor() { ... }` definition lines as call sites.
+- `ffcapsule` now falls back to `.md` headers/lists when a symbol has no source definition.
+- `ffoutline` `depth` is clamped to 0 or 1; `ffmap` now enforces `limit`; `maxChars` must be >= 1 for all tools; `limit` and `depth` must be integers.
+
 ## [0.8.10]
 
 ### Fixed

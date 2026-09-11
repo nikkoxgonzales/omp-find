@@ -124,7 +124,8 @@ describe('stress-round6: capsule finds method definitions', () => {
 
 describe('stress-round6: chained combinators error instead of silently matching nothing', () => {
   it('inside:/has: operands starting with a combinator prefix throw a clean error', async () => {
-    for (const p of ['inside: inside: x >> y', 'has: $X << has: y', 'inside: has: a >> b', 'inside: kind: call >> $X', 'has: $X << symbol: y']) {
+    // Recursive inside:/has: chaining is rejected; kind:/symbol:/references: are valid structural operands.
+    for (const p of ['inside: inside: x >> y', 'has: $X << has: y', 'inside: has: a >> b']) {
       assert.throws(() => search.compileStructural(p), /combinators cannot be chained/, `no error for ${p}`);
     }
     // tool layer surfaces it via the <tool> failed: contract
@@ -135,11 +136,13 @@ describe('stress-round6: chained combinators error instead of silently matching 
       const tool = pi.tools.get('ffstructural');
       const out = textOf(await tool.execute('t1', { pattern: 'inside: inside: x >> y', cwd: root }));
       assert.match(out, /ffstructural failed:.*combinators cannot be chained/, `tool output:\n${out}`);
-      // unchained combinators still compile
-      const ok = search.compileStructural('inside: import >> $X');
+      // unchained combinators with kind:/symbol:/references: inner operands now compile
+      const ok = search.compileStructural('inside: import >> kind:call');
       assert.equal(ok.mode, 'inside');
-      const ok2 = search.compileStructural('has: $X << return');
+      const ok2 = search.compileStructural('has: $X << symbol: y');
       assert.equal(ok2.mode, 'has');
+      const ok3 = search.compileStructural('inside: class Widget >> $M(');
+      assert.equal(ok3.mode, 'inside');
     } finally {
       await rm(root, { recursive: true, force: true });
     }
