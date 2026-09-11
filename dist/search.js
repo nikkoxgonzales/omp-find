@@ -2,6 +2,7 @@
 import { execFile, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { outlineFile } from "./outline.js";
 export const PAGE_DEFAULT = 30, PAGE_MAX = 50;
 const RG_BUFFER = 64 * 1024 * 1024, GREP_CAP = 20000, MAX_DEPTH = 25;
 /** Per-file ceiling for content scans (fallback stat skip + rg --max-filesize); oversized files never match. */
@@ -455,6 +456,166 @@ export async function callersOf(symbol, opts = {}) {
     const page = pageOf(merged, opts.limit, opts.offset);
     await attachContext(opts.cwd, page, opts.contextBefore ?? 0, opts.contextAfter ?? 0);
     return { matches: page, total: merged.length, backend };
+}
+/** Tools-side path rule mirrored for capsule scoping (dir/ prefix, glob, or bare name). */
+function matchPathFilter(p, filter) {
+    const d = p.replace(/\\/g, "/");
+    const f = filter.startsWith("./") ? filter.slice(2) : filter;
+    if (f.endsWith("/")) {
+        const dir = f.slice(0, -1);
+        return d === dir || d.startsWith(`${dir}/`);
+    }
+    if (/[*?[{]/.test(f)) {
+        const re = globToRegExp(f);
+        return re.test(d) || re.test(d.slice(d.lastIndexOf("/") + 1));
+    }
+    return d === f || d.startsWith(`${f}/`) || d.slice(d.lastIndexOf("/") + 1) === f;
+}
+/** Import-specifier extractors (approximate — centrality only, never shown). */
+const IMPORT_RES = [
+    /(?:import|from)\s+['"]([^'"]+)['"]/g,
+    /require\(\s*['"]([^'"]+)['"]\s*\)/g,
+    /from\s+(\S+)\s+import\s/g,
+    /import\s+([\w.]+)/g,
+    /#include\s+[<"]([^>"]+)[">]/g,
+    /\buse\s+([\w:]+)/g,
+];
+/** Module key: last segment minus one extension (`./dir/search.js` → `search`). */
+function moduleKey(spec) {
+    const seg = spec.split(/[\\/]/).pop() ?? spec;
+    const dot = seg.lastIndexOf(".");
+    return (dot > 0 ? seg.slice(0, dot) : seg).toLowerCase();
+}
+/** File key on the same terms, so `from search import` meets search.ts. */
+function fileKeyOf(p) {
+    const base = p.replace(/\\/g, "/").split("/").pop() ?? p;
+    const dot = base.lastIndexOf(".");
+    return (dot > 0 ? base.slice(0, dot) : base).toLowerCase();
+}
+export async function rankMap(opts = {}) {
+    const cwd = path.resolve(opts.cwd ?? process.cwd());
+    guardCwd(cwd);
+    const { files, backend } = await listFiles(cwd, opts.scan, opts.followSymlinks ?? false);
+    const modified = await gitModifiedSet(cwd);
+    const importers = new Map();
+    const texts = new Map();
+    for (const f of files) {
+        let text;
+        try {
+            if ((await fs.stat(path.join(cwd, f))).size > MAX_GREP_BYTES)
+                continue;
+            const buf = await fs.readFile(path.join(cwd, f));
+            if (buf.indexOf(0) >= 0)
+                continue;
+            text = buf.toString("utf8");
+        }
+        catch {
+            continue;
+        }
+        texts.set(f, text);
+        const specs = new Set();
+        for (const re of IMPORT_RES) {
+            re.lastIndex = 0;
+            let m;
+            while ((m = re.exec(text)) !== null)
+                if (m[1])
+                    specs.add(moduleKey(m[1]));
+        }
+        for (const s of specs) {
+            let set = importers.get(s);
+            if (!set) {
+                set = new Set();
+                importers.set(s, set);
+            }
+            set.add(f);
+        }
+    }
+    const out = [];
+    for (const f of texts.keys()) {
+        let symbols = [];
+        try {
+            symbols = (await outlineFile(f, { cwd, depth: 0 })).symbols;
+        }
+        catch {
+            symbols = [];
+        }
+        let inDegree = 0;
+        const set = importers.get(fileKeyOf(f));
+        if (set)
+            for (const imp of set)
+                if (imp !== f)
+                    inDegree++;
+        out.push({ path: toNative(f), symbols, modified: modified !== null && modified.has(f), inDegree });
+    }
+    out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    return { files: out, total: out.length, scanned: files.length, backend };
+}
+export async function capsuleOf(symbol, opts = {}) {
+    const cwd = path.resolve(opts.cwd ?? process.cwd());
+    guardCwd(cwd);
+    if (!symbol)
+        throw new Error("capsule symbol must not be empty");
+    const ignoreCase = opts.ignoreCase ?? false;
+    const eq = (a, b) => ignoreCase ? a.toLowerCase() === b.toLowerCase() : a === b;
+    const esc = escapeRegExp(symbol);
+    const base = { cwd: opts.cwd, scan: opts.scan, followSymlinks: opts.followSymlinks, timeoutMs: opts.timeoutMs };
+    const mentions = await grepContents(`\\b${esc}\\b`, { ...base, literal: false, ignoreCase });
+    const inScope = (p) => !opts.pathFilter || matchPathFilter(p.replace(/\\/g, "/"), opts.pathFilter);
+    const byFile = new Map();
+    for (const m of mentions.matches) {
+        const p = m.path.replace(/\\/g, "/");
+        if (inScope(p))
+            byFile.set(m.path, (byFile.get(m.path) ?? 0) + 1);
+    }
+    const ordered = [...byFile.entries()].sort((a, b) => b[1] - a[1]).map(([p]) => p).slice(0, 30);
+    let def;
+    for (const f of ordered) {
+        let syms;
+        try {
+            syms = (await outlineFile(f, { cwd, depth: 0 })).symbols;
+        }
+        catch {
+            continue;
+        }
+        const hit = syms.find((s) => eq(s.name, symbol) && s.kind !== "import") ?? syms.find((s) => eq(s.name, symbol));
+        if (hit) {
+            def = { file: f, line: hit.line, kind: hit.kind || "symbol" };
+            break;
+        }
+    }
+    const doc = [];
+    if (def) {
+        try {
+            const text = (await fs.readFile(path.join(cwd, def.file), "utf8")).split("\n");
+            for (let i = def.line - 2; i >= Math.max(0, def.line - 7); i--) {
+                const t = (text[i] ?? "").trim();
+                if (/^(\/\/|#|\*|\/\*|--|"""|'''|;)/.test(t))
+                    doc.unshift(text[i].replace(/\s+$/, ""));
+                else
+                    break;
+            }
+        }
+        catch { /* no doc without a readable file */ }
+    }
+    const lim = Math.min(Math.max(opts.limit ?? 10, 1), PAGE_MAX);
+    const callers = await callersOf(symbol, { ...base, ignoreCase, limit: lim });
+    const imp = await grepContents(`(?:import|from|require|use|include)\\b[^\\n]*\\b${esc}\\b`, { ...base, literal: false, ignoreCase, limit: lim });
+    const files = new Set();
+    if (def)
+        files.add(def.file);
+    for (const m of callers.matches)
+        if (inScope(m.path.replace(/\\/g, "/")))
+            files.add(m.path);
+    for (const m of imp.matches)
+        if (inScope(m.path.replace(/\\/g, "/")))
+            files.add(m.path);
+    return {
+        symbol, found: def !== undefined || callers.total > 0 || imp.total > 0,
+        defFile: def?.file, defLine: def?.line, defKind: def?.kind, doc,
+        callers: callers.matches.filter((m) => inScope(m.path.replace(/\\/g, "/"))),
+        imports: imp.matches.filter((m) => inScope(m.path.replace(/\\/g, "/"))),
+        filesInvolved: files.size, backend: mentions.backend,
+    };
 }
 /** Best-effort warm scan (no watcher/index — primes the OS cache). Never throws. */
 export async function warmScan() {

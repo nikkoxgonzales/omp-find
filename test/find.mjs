@@ -266,7 +266,7 @@ describe('extension + tools wiring (needs core)', () => {
     if (oldEnv === undefined) delete process.env.OMP_FIND_MODE;
     else process.env.OMP_FIND_MODE = oldEnv;
     assert.ok(pi.commands.has('find-health'), 'commands wired via extension');
-    assert.deepEqual([...pi.tools.keys()].sort(), ['ffcallers', 'fffind', 'ffgrep', 'ffoutline', 'ffstructural', 'find', 'grep', 'outline', 'structural'], `override default wires all nine: ${[...pi.tools.keys()]}`);
+    assert.deepEqual([...pi.tools.keys()].sort(), ['capsule', 'ffcallers', 'ffcapsule', 'fffind', 'ffgrep', 'ffmap', 'ffoutline', 'ffstructural', 'find', 'grep', 'map', 'outline', 'structural'], `override default wires all thirteen: ${[...pi.tools.keys()]}`);
     // Mirror of the real host's required tool fields (host.ts:63-73).
     for (const [key, def] of pi.tools) {
       assert.equal(typeof def.name, 'string', `${key}: name is a string`);
@@ -302,7 +302,7 @@ describe('extension + tools wiring (needs core)', () => {
     if (!findTools?.registerFindTools || !search?.findPaths) return t.skip('core not landed yet');
     const pi = fakePi();
     findTools.registerFindTools(pi, { search, frecency }, { mode: 'additive' });
-    assert.deepEqual([...pi.tools.keys()].sort(), ['ffcallers', 'fffind', 'ffgrep', 'ffoutline', 'ffstructural', 'outline', 'structural'], 'additive leaves host names alone');
+    assert.deepEqual([...pi.tools.keys()].sort(), ['capsule', 'ffcallers', 'ffcapsule', 'fffind', 'ffgrep', 'ffmap', 'ffoutline', 'ffstructural', 'map', 'outline', 'structural'], 'additive leaves host names alone');
   });
 
   it('override aliases execute identically to canonical names', async (t) => {

@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.5.0). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.6.0). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -129,7 +129,7 @@ Host-native zero-deps is existential, not aesthetic: Bun-compiled fff-bun vs fff
 Marketplace (recommended): `omp plugin marketplace add nikkoxgonzales/omp-find`
 then `omp plugin install omp-find@omp-find` (wrapper
 `.omp-plugin/marketplace.json`: name/owner/metadata + `plugins[]` entry, version
-mirrors `package.json` 0.4.0). Or direct: `omp plugin install
+mirrors `package.json` 0.6.0). Or direct: `omp plugin install
 github:nikkoxgonzales/omp-find`. Restart omp; verify `/find-health` shows index +
 frecency status. Dev: `npm install && npm test`.
 
@@ -173,10 +173,14 @@ counts, grep/callers/structural→per-file counts, outline→kind counts) comple
   Card: "Use instead of hand-rolled AST-ish shell grep chains … rewrite
   returns a preview diff only and never writes." Re-exported through
   `search.ts` like `outlineFile`.
+- **`ffmap`** (`map` alias) — `search.rankMap(opts)` → `{files: {path, symbols, modified, inDegree}[], total, scanned, backend}`: one listing, one git status, one text read per file (import-centrality over approximate specifier extractors — centrality only, never shown) plus one `outlineFile` depth-0 pass. Tools-side score `frecency + git + log1p(inDegree)`; file cutoff binary-searched to fit `maxChars` (default 8000) with an omitted-files footer; no cursor — re-call refines. Card: "Use instead of reading directory trees or shell ls -R … never stale."
+- **`ffcapsule`** (`capsule` alias) — `search.capsuleOf(symbol, opts)` composes existing cores only: word-mention candidates (30 most-mentioned files cap) → first name-matching non-import depth-0 outline row as def → up to 5 contiguous comment lines above it as doc → bounded `callersOf` + import-line grep → `Guidance:` footer (top caller → ffoutline it; def-only → read it; nothing → ffgrep). Caller/import rows shrink to fit `maxChars`, noted when they do. Single dossier, no cursor. Card: "Use instead of N round-trips … data-driven next step."
 - **ffgrep context** — `GrepOptions.contextBefore/contextAfter` (cap 5 via
   `clampContext`, default 0); `GrepMatch.before/after`; `attachContext` slices
   file lines (each file read once) for BOTH backends — `rg --vimgrep` silently
   drops `-B`/`-C`, so no `-B`/`-C` is passed. Context rows render indented
   without a column (`  path:line: text`); cursor state carries the windows;
+- **`concise` density** — opt-in param on find/grep/outline: paths-only rows, `path:line` probes (context suppressed), name-only outlines. Same ranking and paging, carried in cursor state.
+- **Budgeted nudges** — `tools.ts` `nudge()`: one rotating cross-tool tip appended to non-trivial results (hits > 5), 3 per tool per process; trivial calls stay clean. Footer-only, never blocks or redirects.
 - **Cursor ids** — `storeCursor` prefixes per kind (`find_c`/`grep_c`/`outline_c`/
   `callers_c`/`structural_c`), 200-entry cap, unchanged eviction.

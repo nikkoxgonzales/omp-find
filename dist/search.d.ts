@@ -1,3 +1,4 @@
+import type { OutlineSymbol } from "./outline.js";
 export declare const PAGE_DEFAULT = 30, PAGE_MAX = 50;
 export interface ParsedFindQuery {
     fuzzy: string;
@@ -81,6 +82,56 @@ lines, member access), merged/deduped by path:line. Explicitly NOT LSP-accurate:
 same-named locals and comments can match; definition lines are filtered out.
 Callers confirm hits with read. */
 export declare function callersOf(symbol: string, opts?: CallersOptions): Promise<GrepResult>;
+/** ffmap core: ranked per-file depth-0 outlines for a fitted repo overview.
+ * Fresh scan every call (no index): one walker/rg listing, one git status,
+ * one text read per file for import-centrality plus one outline pass.
+ * Ranking inputs (frecency re-rank happens tools-side) are returned raw:
+ * `modified` (git porcelain membership) and `inDegree` (importer count over
+ * approximate import-specifier extractors — centrality only, never shown). */
+export interface MapFile {
+    path: string;
+    symbols: OutlineSymbol[];
+    modified: boolean;
+    inDegree: number;
+}
+export interface MapResult {
+    files: MapFile[];
+    total: number;
+    scanned: number;
+    backend: ScanBackend;
+}
+export interface MapOptions {
+    cwd?: string;
+    scan?: string;
+    followSymlinks?: boolean;
+}
+export declare function rankMap(opts?: MapOptions): Promise<MapResult>;
+/** ffcapsule core: fused symbol dossier from existing cores only (no new scan
+ * machinery). Definition = first name-matching non-import depth-0 outline row
+ * across the most-mentioned candidate files (capped at 30); doc = up to 5
+ * contiguous comment lines above it; callers/imports = bounded live queries. */
+export interface CapsuleResult {
+    symbol: string;
+    found: boolean;
+    defFile?: string;
+    defLine?: number;
+    defKind?: string;
+    doc: string[];
+    callers: GrepMatch[];
+    imports: GrepMatch[];
+    filesInvolved: number;
+    backend: ScanBackend;
+}
+export interface CapsuleOptions {
+    cwd?: string;
+    ignoreCase?: boolean;
+    pathFilter?: string;
+    limit?: number;
+    scan?: string;
+    followSymlinks?: boolean;
+    timeoutMs?: number;
+}
+export declare function capsuleOf(symbol: string, opts?: CapsuleOptions): Promise<CapsuleResult>;
 /** Best-effort warm scan (no watcher/index — primes the OS cache). Never throws. */
 export declare function warmScan(): Promise<void>;
 /** Fresh rg presence + version and serving backend for `/find-health` (string form, read synchronously). */

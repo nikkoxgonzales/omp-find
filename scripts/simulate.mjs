@@ -329,6 +329,31 @@ if (tools.has('outline')) {
   });
 }
 
+await scenario('ffmap fitted overview + map alias', async () => {
+  const out = await callTool('ffmap', { cwd: tree, maxChars: 2000 });
+  show('ffmap', out);
+  assert(out.includes('server.py:'), `map lists fixture files:\n${out}`);
+  assert(out.includes('serve'), `map shows symbols:\n${out}`);
+  if (tools.has('map')) {
+    const tight = await callTool('map', { cwd: tree, maxChars: 40 });
+    show('map alias (tight budget)', tight);
+    assert(tight.includes('files omitted'), `tight map omits:\n${tight}`);
+  }
+  return 'fitted overview + budget cutoff on the installed surface';
+});
+await scenario('ffcapsule dossier + capsule alias', async () => {
+  const out = await callTool('ffcapsule', { symbol: 'parseFindQuery', cwd: tree });
+  show('ffcapsule', out);
+  assert(out.includes('server.py'), `dossier touches server.py:\n${out}`);
+  assert(out.includes('Guidance:'), `dossier guides:\n${out}`);
+  if (tools.has('capsule')) {
+    const alias = await callTool('capsule', { symbol: 'parseFindQuery', cwd: tree });
+    show('capsule alias', alias);
+    assert(alias.includes('server.py'), `capsule alias diverged:\n${alias}`);
+  }
+  return 'fused dossier + guidance on the installed surface';
+});
+
 // ------------------------------------------------- full-surface coverage gate
 const uncoveredTools = [...tools.keys()].filter((t) => !calledTools.has(t));
 if (uncoveredTools.length > 0) {

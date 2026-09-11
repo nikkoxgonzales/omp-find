@@ -1061,7 +1061,7 @@ describe('extension host tolerance', () => {
     pi2.emit('session_start', {}, {});
     await new Promise((r) => setTimeout(r, 150));
     assert.ok(pi2.commands.has('find-health'), 'commands wired');
-    assert.deepEqual([...pi2.tools.keys()].sort(), ['ffcallers', 'fffind', 'ffgrep', 'ffoutline', 'ffstructural', 'find', 'grep', 'outline', 'structural']);
+    assert.deepEqual([...pi2.tools.keys()].sort(), ['capsule', 'ffcallers', 'ffcapsule', 'fffind', 'ffgrep', 'ffmap', 'ffoutline', 'ffstructural', 'find', 'grep', 'map', 'outline', 'structural']);
     pi2.emit('session_start', {}, {});
   });
 });

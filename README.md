@@ -13,7 +13,10 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 - **`ffoutline`** (`outline` alias) — approximate per-file symbol overview. Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline → grep → read. Regex-based, explicitly approximate, every hit carries a line number.
 - **`ffcallers`** — approximate "who calls X". Use instead of shell grep chains: definition-vs-import-vs-call-site queries collapse into one frecency-ranked call. Text heuristics, explicitly approximate — confirm with read. Rows carry certainty labels: import/call-paren sites are exact, member mentions are `[possible]`-tagged; `exact_only` drops the possible rows.
 - **`ffstructural`** (`structural` alias) — approximate structural search. Use instead of hand-rolled AST-ish shell grep chains: `$VAR`/`$$$` patterns, `kind:`/`symbol:`/`references:`/`inside:`/`has:` lower to one ranked regex call with exactly one of pattern/symbol/references; `rewrite` returns a `-`/`+` preview and never writes. Regex lowering, explicitly approximate — every row is `approx:` labeled.
-- **`maxChars` budgets** — on `fffind`/`ffgrep`/`ffoutline`/`ffcallers`/`ffstructural`. Over-budget output degrades to counts instead of shell-pipe dumps: per-dir (find), per-file (grep/callers/structural), kind counts (outline).
+- **`ffmap`** (`map` alias) — fitted repo overview. Use instead of reading directory trees or shell `ls -R` to learn a repo: per-file symbol outlines ranked by frecency, git recency and import-centrality, cut to fit `maxChars` (default 8000). Fresh scan every call — never stale.
+- **`ffcapsule`** (`capsule` alias) — fused symbol dossier. Use instead of N round-trips (outline file, grep symbol, grep imports, list callers): signature + doc comment + top callers + import sites + a data-driven `Guidance:` next step in one call. All rows approximate — confirm with read.
+- **`concise`** — density knob on `fffind`/`ffgrep`/`ffoutline`. Minified end of the rendering range: paths-only rows, `path:line` probes, name-only outlines. Composes with (not replaces) cursors + `maxChars`.
+- **`maxChars` budgets** — on every tool. Over-budget output degrades to counts/summaries instead of shell-pipe dumps: per-dir (find), per-file (grep/callers/structural), kind counts (outline), omitted-files footer (map), row shrinking (capsule).
 - **Query subset** — `dir/` prefix, `*.ext`-style globs, `!` exclusions, `git:modified`; leftover words fuzzy-match the path.
 - **Per-project JSON frecency** — every opened file bumps count + recency (7-day half-life decay); frequent/recent paths sort first. Stored under `%LOCALAPPDATA%/omp-find` (Windows) or `~/.omp/var/omp-find`, keyed by project-root hash.
 - **Cursor pagination** — default 30 results per page, max 50; fuller pages return an opaque `cursor` for the next page. Cursors bind to the fetched snapshot (result total + backend): resuming after the tree changes returns restart guidance (`results changed since page 1; re-run without cursor`), never a silently shifted page.
@@ -39,6 +42,7 @@ fffind ("Find files"; `find` in override mode)
   limit: "Max results per page (default 30, max 50)"
   cursor: "Opaque pagination cursor from a previous call"
   maxChars: "Max output chars; when exceeded returns per-dir counts instead of rows"
+  concise: "Concise paths-only rows (default false) — drops notes and tips, same ranking"
 ffgrep ("Grep content"; `grep` in override mode)
   "Use instead of shell grep/rg/find/ls because results are literal-safe, frecency-ranked, paged, and counted. [...]"
   approval: read
@@ -59,6 +63,7 @@ ffgrep ("Grep content"; `grep` in override mode)
   contextBefore: "Context lines before each match (default 0, max 5)"
   contextAfter: "Context lines after each match (default 0, max 5)"
   maxChars: "Max output chars; when exceeded returns per-file counts instead of rows"
+  concise: "Concise path:line rows (default false) — existence probe without text; ignores context params"
 ffoutline ("Outline file"; `outline` alias, always registered)
   "Approximate per-file symbol overview (omp-find). Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline->grep->read. Regex-based, not LSP-accurate; every hit carries a line number — verify with read/ffgrep. Does not record frecency."
   approval: read
@@ -71,6 +76,7 @@ ffoutline ("Outline file"; `outline` alias, always registered)
   limit: "Max symbols per page (default 30, max 50)"
   cursor: "Opaque pagination cursor from a previous call"
   maxChars: "Max output chars; when exceeded returns kind counts instead of rows"
+  concise: "Concise name-only rows (default false) — minified shape probe; drops locations"
 ffcallers ("Find callers")
   "Approximate 'who calls X' (omp-find). Use instead of shell grep chains for who-calls-X: definition vs import vs call-site queries collapse into one ranked call. Text heuristics over call parens, imports, and member access — not LSP-accurate; confirm with read."
   approval: read
@@ -104,7 +110,30 @@ ffstructural ("Structural search"; `structural` alias, always registered)
   contextAfter: "Context lines after each match (default 0, max 5)"
   maxChars: "Max output chars; when exceeded returns per-file counts instead of rows"
   rewrite: "Rewrite template with $NAME slots; returns a unified -/+ preview only — nothing is ever written"
-Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." (no/excess pattern/symbol/references, unknown/expired cursor, non-absolute cwd).
+ffmap ("Repo map"; `map` alias, always registered)
+  "Fitted repo overview (omp-find). Use instead of reading directory trees or shell ls -R to learn a repo: per-file symbol outlines ranked by frecency, git recency and import-centrality, cut to fit maxChars. Fresh scan every call — never stale."
+  approval: read
+  promptSnippet: "Map the repo: ranked file overview fitted to a budget"
+  promptGuidelines:
+    "ffmap: Map an unfamiliar repo before exploring — one fitted overview beats a shell ls -R plus N file reads."
+    "ffmap: Follow the map with ffoutline <file> for shape, ffgrep for content, read for the range."
+  path: "Dir-scope filter, e.g. 'src/' — map only this subtree"
+  cwd: "Scan root: absolute directory to map (default: session cwd)"
+  maxChars: "Overview budget in chars (default 8000) — the file cutoff is fitted to it"
+ffcapsule ("Symbol dossier"; `capsule` alias, always registered)
+  "Fused symbol dossier (omp-find). Use instead of N round-trips (outline file, grep symbol, grep imports, list callers) to learn one symbol: signature + doc comment + top callers + import sites + a data-driven next step in one call."
+  approval: read
+  promptSnippet: "Dossier on one symbol: def, doc, callers, imports, next step"
+  promptGuidelines:
+    "ffcapsule: Learn one symbol with a single ffcapsule call instead of chaining ffoutline, ffgrep and ffcallers by hand."
+    "ffcapsule: Follow the Guidance: footer — it names the cheapest next call from the data."
+  symbol (required): "Symbol name, e.g. 'parseFindQuery'"
+  path: "File constraint, e.g. 'src/', '*.ts'"
+  cwd: "Scan root: absolute directory to search (default: session cwd)"
+  ignoreCase: "Case-insensitive match"
+  limit: "Max callers/imports shown each (default 10, max 50)"
+  maxChars: "Max output chars; caller/import rows shrink to fit, noted when they do"
+Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." / "ffmap failed: ..." / "ffcapsule failed: ..." (no/excess pattern/symbol/references, unknown/expired cursor, non-absolute cwd).
 Stale cursors (tree changed since page 1) return restart guidance as text: "...: results changed since page 1; re-run without cursor".
 Each execute also returns `details: { totalMatched, totalFiles, truncated }` (pi-fff packaging: totals over the full result set, `truncated` when a next page or count-fallback applies); hosts that ignore it see identical text. Paged results add a `"<limit> matches limit reached. Use limit=<2×limit>"` notice next to the cursor footer.
 ```
@@ -144,6 +173,22 @@ src/search.ts:174:1: function findPaths
 src/tools.ts:210:9: query = [dirParam, pattern]...
 (1 match total)
 
+> ffmap { "maxChars": 800 }   # one fitted overview, not ls -R plus reads
+src/search.ts:
+  function parseFindQuery
+  function findPaths
+... (3 files omitted; raise maxChars or ffoutline <file>)
+
+> ffcapsule { "symbol": "parseFindQuery" }   # one dossier, not N round-trips
+symbol parseFindQuery — function in src/search.ts:17
+doc:
+  (no doc comment)
+callers (2):
+src/tools.ts:210:9: query = [dirParam, pattern]...
+imports (1):
+src/tools.ts:4:1: import type * as SearchNS from "./search.js";
+Guidance: ffoutline src/tools.ts for the top caller's shape
+
 > ffgrep { "pattern": "frecency", "path": "src/", "contextAfter": 1 }
 src/frecency.ts:12:3: const HALF_LIFE_MS = ...
   src/frecency.ts:13: const DAY = ...
@@ -181,14 +226,17 @@ caches dropped (nothing cached)
 
 | Tool / command | What it does |
 |---|---|
-| `fffind` (`pattern`, `path`, `cwd`, `limit`, `cursor`, `maxChars`) | Ranked file paths, workspace-relative; frecency-sorted within fuzzy order. 3+-word zero-result queries retry once with the first 2 terms; empty results report files scanned + backend. Over budget → per-dir counts. |
-| `ffgrep` (`pattern`, `path`, `literal`, `ignoreCase`, `wholeWord`, `smartCase`, `cwd`, `limit`, `cursor`, `contextBefore`, `contextAfter`, `maxChars`) | `path:line:col: text` matches plus a `(N matches total)` line; path filter applies over the full result set. Empty results report the pattern + backend. Context lines (indented, max 5/side) disambiguate without follow-up reads; over budget → per-file counts. |
-| `ffoutline` (`path`, `cwd`, `depth`, `limit`, `cursor`, `maxChars`) | Approximate `path:line:col: kind name` overview — use instead of full reads/ctags shells; composes outline → grep → read. Over budget → kind counts. |
+| `fffind` (`pattern`, `path`, `cwd`, `limit`, `cursor`, `maxChars`, `concise`) | Ranked file paths, workspace-relative; frecency-sorted within fuzzy order. 3+-word zero-result queries retry once with the first 2 terms; empty results report files scanned + backend. Over budget → per-dir counts. `concise` keeps paths-only rows without notes/tips. |
+| `ffgrep` (`pattern`, `path`, `literal`, `ignoreCase`, `wholeWord`, `smartCase`, `cwd`, `limit`, `cursor`, `contextBefore`, `contextAfter`, `maxChars`, `concise`) | `path:line:col: text` matches plus a `(N matches total)` line; path filter applies over the full result set. Empty results report the pattern + backend. Context lines (indented, max 5/side) disambiguate without follow-up reads; over budget → per-file counts. `concise` renders `path:line` probes, ignoring context. |
+| `ffoutline` (`path`, `cwd`, `depth`, `limit`, `cursor`, `maxChars`, `concise`) | Approximate `path:line:col: kind name` overview — use instead of full reads/ctags shells; composes outline → grep → read. Over budget → kind counts. `concise` renders name-only rows. |
 | `ffcallers` (`symbol`, `path`, `cwd`, `ignoreCase`, `limit`, `cursor`, `maxChars`, `exact_only`) | Approximate `path:line:col: text` reference sites — use instead of shell grep chains; frecency-ranked. Import/call-paren rows are exact, member mentions carry `[possible]`; `exact_only` keeps exact rows. Over budget → per-file counts. |
+| `ffstructural` (`pattern`, `symbol`, `references`, `language`, `path`, `ignoreCase`, `limit`, `cursor`, `contextBefore`, `contextAfter`, `maxChars`, `rewrite`) | Approximate structural search — ast-grep-style `$VAR`/`$$$` patterns lower to one ranked call; exactly one of pattern/symbol/references; `rewrite` previews only. Rows `approx:` labeled. |
+| `ffmap` (`path`, `cwd`, `maxChars`) | Fitted `path:` + symbol overview ranked by frecency/recency/centrality; omitted-files footer. No cursor — re-call with a bigger budget refines. |
+| `ffcapsule` (`symbol`, `path`, `cwd`, `ignoreCase`, `limit`, `maxChars`) | Fused dossier: def + doc + callers + imports + `Guidance:` next step. Single page, no cursor. |
 | `/find-health` | Scan backend status (rg version or walker fallback) plus frecency status, with ok/warn/error levels. |
 | `/find-rescan` | Drops the frecency store (nothing else is cached). |
 
-`fffind` / `ffgrep` / `ffoutline` / `ffcallers` are always present (`outline` aliases `ffoutline`); override mode additionally claims `find` / `grep` (same handlers, where the host allows).
+`fffind` / `ffgrep` / `ffoutline` / `ffcallers` / `ffstructural` / `ffmap` / `ffcapsule` are always present (`outline`, `structural`, `map`, `capsule` aliases); override mode additionally claims `find` / `grep` (same handlers, where the host allows).
 
 ## Config
 

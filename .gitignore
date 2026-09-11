@@ -12,3 +12,6 @@ node_modules/
 # OS / editor noise
 Thumbs.db
 Desktop.ini
+# Test/coverage byproducts (gates run on every release; output never ships)
+coverage/
+.nyc_output/

@@ -71,6 +71,38 @@ function tagCallerRows(symbol, m, ignoreCase) {
         rows[0] = `[possible] ${rows[0]}`;
     return rows;
 }
+/** hermes nudges: budgeted rotating cross-tool tips on non-trivial results.
+ * Static card copy can't react to what just happened; nudges are the dynamic,
+ * budgeted complement — one rotating tip per call, 3 per tool per process
+ * (same eviction spirit as storeCursor), only when hits > 5 so trivial calls
+ * stay clean. Footer-only; never blocks or redirects. */
+const NUDGE_BUDGET = 3;
+const nudgeUsed = new Map();
+const NUDGES = {
+    find: [
+        "tip: ffoutline <file> shows a file's shape before you read it",
+        "tip: ffcallers <name> finds call sites without grep chains",
+        "tip: ffmap gives a fitted repo overview in one call",
+    ],
+    grep: [
+        "tip: ffcallers <name> finds call sites without grep chains",
+        "tip: ffstructural 'f($A)' finds call shapes, not strings",
+        "tip: ffcapsule <name> fuses signature, doc, callers and next step in one call",
+    ],
+};
+/** One rotating tip for non-trivial results; empty for trivial calls. */
+function nudge(kind, hits) {
+    if (hits <= 5)
+        return [];
+    const tips = NUDGES[kind];
+    if (!tips)
+        return [];
+    const used = nudgeUsed.get(kind) ?? 0;
+    if (used >= NUDGE_BUDGET)
+        return [];
+    nudgeUsed.set(kind, used + 1);
+    return ["", tips[used % tips.length]];
+}
 function errMsg(err) {
     return err instanceof Error ? err.message : String(err);
 }
@@ -221,12 +253,13 @@ export function registerFindTools(pi, deps, opts = {}) {
                 limit: { type: "number", description: "Max results per page (default 30, max 50)" },
                 cursor: { type: "string", description: "Opaque pagination cursor from a previous call" },
                 maxChars: { type: "number", description: "Max output chars; when exceeded returns per-dir counts instead of rows" },
+                concise: { type: "boolean", description: "Concise paths-only rows (default false) — drops notes and tips, same ranking" },
             },
             additionalProperties: false,
         },
         execute: async (_toolCallId, params) => {
             try {
-                let query, limit, offset, cwd, maxChars;
+                let query, limit, offset, cwd, maxChars, concise;
                 let all;
                 let relaxed;
                 let scanned, backend;
@@ -241,6 +274,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     offset = st.nextOffset;
                     cwd = st.cwd;
                     maxChars = st.maxChars;
+                    concise = st.concise === true;
                     bound = { total: st.total, backend: st.backend };
                     const live = await runFind(search, query, { cwd, limit: PAGE_MAX, offset: 0 });
                     all = live.paths;
@@ -257,6 +291,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     offset = 0;
                     cwd = cwdParam(params);
                     maxChars = charsParam(params, "maxChars");
+                    concise = params["concise"] === true;
                     let fetched = await runFind(search, query, { cwd, limit: PAGE_MAX, offset: 0 });
                     scanned = fetched.scanned;
                     backend = fetched.backend;
@@ -292,13 +327,15 @@ export function registerFindTools(pi, deps, opts = {}) {
                 const hasMore = offset + page.length < total;
                 const details = { totalMatched: total, totalFiles: scanned ?? total, truncated: hasMore };
                 if (hasMore) {
-                    const next = storeCursor({ kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars, total, backend });
+                    const next = storeCursor({ kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars, concise, total, backend });
                     lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
                 if (lines.length === 0)
                     return withDetails(zeroFind(scanned, backend, relaxed), { totalMatched: 0, totalFiles: scanned ?? 0, truncated: false });
-                if (relaxed !== undefined)
+                if (!concise && relaxed !== undefined)
                     lines.unshift(`note: no matches for "${relaxed.from}"; showing results for "${relaxed.to}"`, "");
+                if (!concise)
+                    lines.push(...nudge("find", total));
                 return withDetails(lines.join("\n"), details);
             }
             catch (err) {
@@ -330,6 +367,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 contextBefore: { type: "number", description: "Context lines before each match (default 0, max 5)" },
                 contextAfter: { type: "number", description: "Context lines after each match (default 0, max 5)" },
                 maxChars: { type: "number", description: "Max output chars; when exceeded returns per-file counts instead of rows" },
+                concise: { type: "boolean", description: "Concise path:line rows (default false) — existence probe without text; ignores context params" },
             },
             required: ["pattern"],
             additionalProperties: false,
@@ -338,7 +376,7 @@ export function registerFindTools(pi, deps, opts = {}) {
             try {
                 let pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter;
                 let limit, offset, cwd;
-                let contextBefore, contextAfter, maxChars;
+                let contextBefore, contextAfter, maxChars, concise;
                 const cursorId = strParam(params, "cursor");
                 let bound;
                 if (cursorId) {
@@ -357,6 +395,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     contextBefore = st.contextBefore;
                     contextAfter = st.contextAfter;
                     maxChars = st.maxChars;
+                    concise = st.concise === true;
                     bound = { total: st.total, backend: st.backend };
                 }
                 else {
@@ -375,6 +414,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     contextBefore = ctxParam(params, "contextBefore");
                     contextAfter = ctxParam(params, "contextAfter");
                     maxChars = charsParam(params, "maxChars");
+                    concise = params["concise"] === true;
                 }
                 // Path filters apply tools-side over the full result set: a bounded fetch
                 // first would drop hits outside the page (false empty zero-states). Word
@@ -382,9 +422,9 @@ export function registerFindTools(pi, deps, opts = {}) {
                 // cursor paging re-fetches with the same flags, so limits never skew them.
                 // Context keys only travel when set: absence keeps the core call identical.
                 const pageOpts = { cwd, literal, ignoreCase, wholeWord, smartCase, limit, offset };
-                if (contextBefore > 0)
+                if (!concise && contextBefore > 0)
                     pageOpts.contextBefore = contextBefore;
-                if (contextAfter > 0)
+                if (!concise && contextAfter > 0)
                     pageOpts.contextAfter = contextAfter;
                 const res = await search.grepContents(pattern, pathFilter ? { cwd, literal, ignoreCase, wholeWord, smartCase } : pageOpts);
                 const pool = pathFilter ? applyPathFilter(res.matches.map((m) => m.path), pathFilter, search.globToRegExp) : null;
@@ -394,10 +434,10 @@ export function registerFindTools(pi, deps, opts = {}) {
                 if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend }))
                     return staleCursor(toolName);
                 const page = pool === null ? matches : matches.slice(offset, offset + limit);
-                if (pool !== null && (contextBefore > 0 || contextAfter > 0) && typeof search.attachContext === "function") {
+                if (!concise && pool !== null && (contextBefore > 0 || contextAfter > 0) && typeof search.attachContext === "function") {
                     await search.attachContext(cwd, page, contextBefore, contextAfter);
                 }
-                const lines = page.flatMap((m) => renderGrepRows(m));
+                const lines = concise ? page.map((m) => `${toDisplay(m.path)}:${m.line}`) : page.flatMap((m) => renderGrepRows(m));
                 if (total > 0 && overBudget(lines.join("\n"), maxChars)) {
                     const byFile = new Map();
                     for (const m of matches)
@@ -409,11 +449,13 @@ export function registerFindTools(pi, deps, opts = {}) {
                     return withDetails(backend !== undefined ? `0 matches for "${pattern}" (${backend})` : `0 matches for "${pattern}"`, { totalMatched: 0, totalFiles: 0, truncated: false });
                 }
                 lines.push(`(${total} match${total === 1 ? "" : "es"} total)`);
+                if (!concise)
+                    lines.push(...nudge("grep", total));
                 const hasMore = offset + page.length < total;
                 const details = { totalMatched: total, totalFiles: new Set(matches.map((m) => m.path)).size, truncated: hasMore };
                 if (hasMore) {
                     const next = storeCursor({
-                        kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, maxChars, total, backend: liveBackend,
+                        kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, maxChars, concise, total, backend: liveBackend,
                     });
                     lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
@@ -441,6 +483,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 limit: { type: "number", description: "Max symbols per page (default 30, max 50)" },
                 cursor: { type: "string", description: "Opaque pagination cursor from a previous call" },
                 maxChars: { type: "number", description: "Max output chars; when exceeded returns kind counts instead of rows" },
+                concise: { type: "boolean", description: "Concise name-only rows (default false) — minified shape probe; drops locations" },
             },
             required: ["path"],
             additionalProperties: false,
@@ -449,7 +492,7 @@ export function registerFindTools(pi, deps, opts = {}) {
             try {
                 if (typeof search.outlineFile !== "function")
                     return text(`${toolName} failed: outline unavailable`);
-                let file, depth, limit, offset, cwd, maxChars;
+                let file, depth, limit, offset, cwd, maxChars, concise;
                 let bound;
                 const cursorId = strParam(params, "cursor");
                 if (cursorId) {
@@ -462,6 +505,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     offset = st.nextOffset;
                     cwd = st.cwd;
                     maxChars = st.maxChars;
+                    concise = st.concise === true;
                     bound = { total: st.total };
                 }
                 else {
@@ -475,13 +519,14 @@ export function registerFindTools(pi, deps, opts = {}) {
                     offset = 0;
                     cwd = cwdParam(params);
                     maxChars = charsParam(params, "maxChars");
+                    concise = params["concise"] === true;
                 }
                 const res = await search.outlineFile(file, { cwd, depth });
                 if (bound !== undefined && snapshotMismatch(bound, { total: res.total }))
                     return staleCursor(toolName);
                 const disp = toDisplay(file);
                 const page = res.symbols.slice(offset, offset + limit);
-                const lines = page.map((s) => `${disp}:${s.line}:${s.col}: ${s.kind} ${s.name}`);
+                const lines = concise ? page.map((s) => s.name) : page.map((s) => `${disp}:${s.line}:${s.col}: ${s.kind} ${s.name}`);
                 if (res.total > 0 && overBudget(lines.join("\n"), maxChars)) {
                     const byKind = new Map();
                     for (const s of res.symbols)
@@ -490,7 +535,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 }
                 const hasMore = offset + page.length < res.total;
                 if (hasMore) {
-                    const next = storeCursor({ kind: "outline", file, depth, limit, nextOffset: offset + page.length, cwd, maxChars, total: res.total });
+                    const next = storeCursor({ kind: "outline", file, depth, limit, nextOffset: offset + page.length, cwd, maxChars, concise, total: res.total });
                     lines.push("", `... (${res.total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
                 const details = { totalMatched: res.total, totalFiles: 1, truncated: hasMore };
@@ -711,6 +756,148 @@ export function registerFindTools(pi, deps, opts = {}) {
             }
         },
     });
+    const mapDef = (toolName) => ({
+        description: "Fitted repo overview (omp-find). Use instead of reading directory trees or shell ls -R to learn a repo: per-file symbol outlines ranked by frecency, git recency and import-centrality, cut to fit maxChars. Fresh scan every call — never stale. Rows are approximate outlines; verify with ffoutline/read.",
+        promptSnippet: "Map the repo: ranked file overview fitted to a budget",
+        approval: "read",
+        promptGuidelines: [
+            "ffmap: Map an unfamiliar repo before exploring — one fitted overview beats a shell ls -R plus N file reads.",
+            "ffmap: Follow the map with ffoutline <file> for shape, ffgrep for content, read for the range.",
+        ],
+        parameters: {
+            type: "object",
+            properties: {
+                path: { type: "string", description: "Dir-scope filter, e.g. 'src/' — map only this subtree" },
+                cwd: { type: "string", description: "Scan root: absolute directory to map (default: session cwd); refused for filesystem-root and home" },
+                maxChars: { type: "number", description: "Overview budget in chars (default 8000) — the file cutoff is fitted to it" },
+            },
+            additionalProperties: false,
+        },
+        execute: async (_toolCallId, params) => {
+            try {
+                if (typeof search.rankMap !== "function")
+                    return text(`${toolName} failed: map unavailable`);
+                const cwd = cwdParam(params);
+                const scope = strParam(params, "path");
+                const budget = charsParam(params, "maxChars") ?? 8000;
+                const res = await search.rankMap({ cwd });
+                const pool = scope ? applyPathFilter(res.files.map((f) => f.path), scope, search.globToRegExp) : null;
+                const files = pool === null ? res.files : res.files.filter((f) => pool.includes(f.path));
+                const ranked = await Promise.all(files.map(async (f) => ({ f, s: (await safeScore(frecency, f.path)) + (f.modified ? 1 : 0) + Math.log1p(f.inDegree) })));
+                ranked.sort((a, b) => b.s - a.s); // stable: frecency + git recency + centrality, path order otherwise
+                const shown = ranked.filter((r) => r.f.symbols.length > 0);
+                const blocks = shown.map((r) => [`${toDisplay(r.f.path)}:`, ...r.f.symbols.map((s) => `  ${s.kind} ${s.name}`)]);
+                // Binary-search the file cutoff to fit the budget (prefix sums over block sizes).
+                const sizes = [];
+                let acc = 0;
+                for (const b of blocks) {
+                    acc += b.join("\n").length + 1;
+                    sizes.push(acc);
+                }
+                let lo = 0, hi = blocks.length;
+                while (lo < hi) {
+                    const mid = Math.floor((lo + hi + 1) / 2);
+                    if (mid === 0 || sizes[mid - 1] - 1 <= budget)
+                        lo = mid;
+                    else
+                        hi = mid - 1;
+                }
+                const lines = blocks.slice(0, lo).flat();
+                const omitted = shown.length - lo;
+                if (lines.length === 0) {
+                    return withDetails(shown.length === 0 ? `No symbols found${scope ? ` under ${scope}` : ""} (${res.scanned} files scanned, ${res.backend})` : `Overview exceeds ${budget} chars with zero files fitting; raise maxChars`, { totalMatched: shown.length, totalFiles: res.scanned, truncated: omitted > 0 });
+                }
+                if (omitted > 0)
+                    lines.push("", `... (${omitted} files omitted; raise maxChars or ffoutline <file>)`);
+                return withDetails(lines.join("\n"), { totalMatched: shown.length, totalFiles: res.scanned, truncated: omitted > 0 });
+            }
+            catch (err) {
+                return text(`${toolName} failed: ${errMsg(err)}`);
+            }
+        },
+    });
+    const capsuleDef = (toolName) => ({
+        description: "Fused symbol dossier (omp-find). Use instead of N round-trips (outline file, grep symbol, grep imports, list callers) to learn one symbol: signature + doc comment + top callers + import sites + a data-driven next step in one call. All rows are approximate text heuristics with line numbers — confirm with read.",
+        promptSnippet: "Dossier on one symbol: def, doc, callers, imports, next step",
+        approval: "read",
+        promptGuidelines: [
+            "ffcapsule: Learn one symbol with a single ffcapsule call instead of chaining ffoutline, ffgrep and ffcallers by hand.",
+            "ffcapsule: Follow the Guidance: footer — it names the cheapest next call from the data.",
+        ],
+        parameters: {
+            type: "object",
+            properties: {
+                symbol: { type: "string", description: "Symbol name, e.g. 'parseFindQuery'" },
+                path: { type: "string", description: "File constraint, e.g. 'src/', '*.ts'" },
+                cwd: { type: "string", description: "Scan root: absolute directory to search (default: session cwd); refused for filesystem-root and home" },
+                ignoreCase: { type: "boolean", description: "Case-insensitive match" },
+                limit: { type: "number", description: "Max callers/imports shown each (default 10, max 50)" },
+                maxChars: { type: "number", description: "Max output chars; caller/import rows shrink to fit, noted when they do" },
+            },
+            required: ["symbol"],
+            additionalProperties: false,
+        },
+        execute: async (_toolCallId, params) => {
+            try {
+                if (typeof search.capsuleOf !== "function")
+                    return text(`${toolName} failed: capsule unavailable`);
+                const s = strParam(params, "symbol");
+                if (!s)
+                    return text(`${toolName} failed: provide a symbol`);
+                const cwd = cwdParam(params);
+                const ignoreCase = params["ignoreCase"] === true;
+                const pathFilter = strParam(params, "path");
+                const limit = numParam(params, "limit") ?? 10;
+                const maxChars = charsParam(params, "maxChars");
+                const res = await search.capsuleOf(s, { cwd, ignoreCase, pathFilter, limit });
+                const disp = (p) => toDisplay(p);
+                const lines = [];
+                if (res.defFile !== undefined)
+                    lines.push(`symbol ${s} — ${res.defKind} in ${disp(res.defFile)}:${res.defLine}`);
+                else
+                    lines.push(`symbol ${s} — no definition found (approximate scan)`);
+                lines.push(...(res.doc.length > 0 ? ["doc:", ...res.doc.map((d) => `  ${d}`)] : ["(no doc comment)"]));
+                let callRows = res.callers.map((m) => `${disp(m.path)}:${m.line}:${m.col}: ${m.text}`);
+                let impRows = res.imports.map((m) => `${disp(m.path)}:${m.line}:${m.col}: ${m.text}`);
+                let shrunk = false;
+                const topCaller = res.callers[0];
+                const guidance = topCaller !== undefined
+                    ? `Guidance: ffoutline ${disp(topCaller.path)} for the top caller's shape`
+                    : res.defFile !== undefined
+                        ? `Guidance: read ${disp(res.defFile)} around line ${res.defLine}`
+                        : `Guidance: ffgrep ${s} for raw matches across the tree`;
+                if (maxChars !== undefined) {
+                    const fixed = [...lines, `callers (${res.callers.length}):`, `imports (${res.imports.length}):`, guidance].join("\n").length + 2;
+                    let room = maxChars - fixed;
+                    const take = (rows) => {
+                        const out = [];
+                        for (const r of rows) {
+                            if (out.length > 0 && room - (r.length + 1) < 0) {
+                                shrunk = true;
+                                break;
+                            }
+                            out.push(r);
+                            room -= r.length + 1;
+                        }
+                        if (out.length < rows.length)
+                            shrunk = true;
+                        return out;
+                    };
+                    callRows = take(callRows);
+                    impRows = take(impRows);
+                }
+                lines.push(`callers (${res.callers.length}):`, ...(callRows.length > 0 ? callRows : ["(none found)"]));
+                lines.push(`imports (${res.imports.length}):`, ...(impRows.length > 0 ? impRows : ["(none found)"]));
+                if (shrunk)
+                    lines.push(`(rows shrunk to fit ${maxChars} chars; raise maxChars)`);
+                lines.push(guidance);
+                return withDetails(lines.join("\n"), { totalMatched: res.found ? 1 : 0, totalFiles: res.filesInvolved, truncated: shrunk });
+            }
+            catch (err) {
+                return text(`${toolName} failed: ${errMsg(err)}`);
+            }
+        },
+    });
     register("fffind", "Find files", findDef("fffind"));
     register("ffgrep", "Grep content", grepDef("ffgrep"));
     if (typeof search.outlineFile === "function") {
@@ -727,6 +914,20 @@ export function registerFindTools(pi, deps, opts = {}) {
         register("ffstructural", "Structural search", structuralDef("ffstructural"));
         try {
             register("structural", "Structural search", structuralDef("structural"));
+        }
+        catch { /* alias where the host allows */ }
+    }
+    if (typeof search.rankMap === "function") {
+        register("ffmap", "Repo map", mapDef("ffmap"));
+        try {
+            register("map", "Repo map", mapDef("map"));
+        }
+        catch { /* alias where the host allows */ }
+    }
+    if (typeof search.capsuleOf === "function") {
+        register("ffcapsule", "Symbol dossier", capsuleDef("ffcapsule"));
+        try {
+            register("capsule", "Symbol dossier", capsuleDef("capsule"));
         }
         catch { /* alias where the host allows */ }
     }

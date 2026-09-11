@@ -3,6 +3,20 @@
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
 
+## [0.6.0]
+
+### Added
+
+- `ffmap` (+ `map` alias): fitted repo overview — per-file depth-0 outlines ranked by frecency, git recency and import-centrality, file cutoff binary-searched to fit `maxChars` (default 8000) with an omitted-files footer.
+- `ffcapsule` (+ `capsule` alias): fused symbol dossier — def + doc comment + top callers + import sites + data-driven `Guidance:` next step in one call; caller/import rows shrink to fit `maxChars`.
+- `concise` density knob on `fffind`/`ffgrep`/`ffoutline`: paths-only rows, `path:line` probes (context suppressed), name-only outlines; same ranking and paging.
+- Budgeted footer nudges: one rotating cross-tool tip on non-trivial results (hits > 5), 3 per tool per process; trivial calls stay clean.
+- Installed-surface simulator grows to 16 scenarios (map + capsule coverage).
+
+### Changed
+
+- README + `docs/extension.md` mirror the new tools, density knob, and nudges; tool table covers all seven tools.
+
 ## [0.5.0]
 
 ### Added
