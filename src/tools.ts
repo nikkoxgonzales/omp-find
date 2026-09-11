@@ -1,4 +1,4 @@
-/** omp-find tool surface: `fffind` + `ffgrep` always; override mode additionally claims `find` + `grep`. */
+/** omp-find tool surface (core default; OMP_FIND_TOOLS=full reserved) with session counters for /find-health. `fffind` + `ffgrep` always; override mode additionally claims `find` + `grep`. */
 import fs from "node:fs";
 import path from "node:path";
 import type * as SearchNS from "./search.js";
@@ -6,7 +6,7 @@ import type * as FrecencyNS from "./frecency.js";
 
 export type FindMode = "additive" | "override";
 export interface FindToolsDeps { search?: typeof SearchNS; frecency?: typeof FrecencyNS }
-export interface RegisterFindToolsOptions { mode?: FindMode; cwd?: string }
+export interface RegisterFindToolsOptions { mode?: FindMode; cwd?: string; tools?: FindToolsTier }
 
 const FIND_PAGE = 30;
 const GREP_PAGE = 30;
@@ -15,9 +15,9 @@ const PAGE_MAX = 50;
 type Snapshot = { total: number; backend?: string };
 type CursorState =
   | { kind: "find"; query: string; limit: number; nextOffset: number; cwd?: string; maxChars?: number; concise: boolean; total: number; backend?: string }
-  | { kind: "grep"; pattern: string; literal: boolean; ignoreCase: boolean; wholeWord: boolean; smartCase: boolean; pathFilter?: string; limit: number; nextOffset: number; cwd?: string; contextBefore: number; contextAfter: number; maxChars?: number; concise: boolean; total: number; backend?: string }
+  | { kind: "grep"; pattern: string; literal: boolean; ignoreCase: boolean; wholeWord: boolean; smartCase: boolean; pathFilter?: string; limit: number; nextOffset: number; cwd?: string; contextBefore: number; contextAfter: number; expand: string; maxChars?: number; concise: boolean; total: number; backend?: string }
   | { kind: "outline"; file: string; depth: number; limit: number; nextOffset: number; cwd?: string; maxChars?: number; concise: boolean; total: number }
-  | { kind: "callers"; symbol: string; ignoreCase: boolean; pathFilter?: string; exactOnly: boolean; limit: number; nextOffset: number; cwd?: string; maxChars?: number; total: number; backend?: string }
+  | { kind: "callers"; symbol: string; ignoreCase: boolean; pathFilter?: string; exactOnly: boolean; depth: number; limit: number; nextOffset: number; cwd?: string; maxChars?: number; total: number; backend?: string }
   | { kind: "structural"; query: string; language?: string; ignoreCase: boolean; pathFilter?: string; rewrite?: string; limit: number; nextOffset: number; cwd?: string; contextBefore: number; contextAfter: number; maxChars?: number; total: number; backend?: string };
 
 const cursors = new Map<string, CursorState>();
@@ -46,6 +46,60 @@ export function resolveFindMode(explicit?: FindMode, cwd: string = process.cwd()
     if (mode === "additive" || mode === "override") return mode;
   } catch { /* missing/unparseable → default */ }
   return "override";
+}
+
+/** Pick 10 — honest session stats: in-memory counters only (no persistence; */
+/** the frecency file stays the only disk state). Each tool execute records one */
+/** call plus wall-clock ms; scan-backed tools also record the serving backend */
+/** (rg vs walker) and timeout rejections. Rendered by /find-health, reset by */
+/** /find-rescan. */
+export interface FindSessionStats {
+  calls: Record<string, number>;
+  totalCalls: number;
+  rg: number;
+  walker: number;
+  timeouts: number;
+  totalMs: number;
+}
+const STAT_KINDS = ["find", "grep", "outline", "callers", "structural", "map", "capsule"];
+const sessionStats: FindSessionStats = { calls: {}, totalCalls: 0, rg: 0, walker: 0, timeouts: 0, totalMs: 0 };
+function recordCall(kind: string, ms: number, backend?: string, timedOut?: boolean): void {
+  sessionStats.calls[kind] = (sessionStats.calls[kind] ?? 0) + 1;
+  sessionStats.totalCalls += 1;
+  sessionStats.totalMs += ms;
+  if (backend === "rg") sessionStats.rg += 1;
+  else if (backend === "walker") sessionStats.walker += 1;
+  if (timedOut === true) sessionStats.timeouts += 1;
+}
+/** Copy of the live counters (callers must not mutate module state). */
+export function getSessionStats(): FindSessionStats {
+  return { calls: { ...sessionStats.calls }, totalCalls: sessionStats.totalCalls, rg: sessionStats.rg, walker: sessionStats.walker, timeouts: sessionStats.timeouts, totalMs: sessionStats.totalMs };
+}
+/** /find-rescan drops these alongside the frecency store (nothing persists). */
+export function resetSessionStats(): void {
+  sessionStats.calls = {};
+  sessionStats.totalCalls = 0;
+  sessionStats.rg = 0;
+  sessionStats.walker = 0;
+  sessionStats.timeouts = 0;
+  sessionStats.totalMs = 0;
+}
+/** One-line session block for /find-health; zero-state stays a plain count. */
+export function sessionStatsText(): string {
+  if (sessionStats.totalCalls === 0) return "session: 0 calls";
+  const per = STAT_KINDS.filter((k) => (sessionStats.calls[k] ?? 0) > 0).map((k) => `${k}: ${sessionStats.calls[k]}`).join(", ");
+  const avg = Math.round(sessionStats.totalMs / sessionStats.totalCalls);
+  return `session: ${sessionStats.totalCalls} calls (${per}); backend rg: ${sessionStats.rg} walker: ${sessionStats.walker}; timeouts: ${sessionStats.timeouts}; avg ${avg}ms`;
+}
+
+/** Pick 11 — tiered tool surface: OMP_FIND_TOOLS=core|full (default core = */
+/** the current surface as it stands; full adds nothing today and is reserved */
+/** for future tools so they don't bloat the default). Unknown values fall */
+/** back to core. */
+export type FindToolsTier = "core" | "full";
+export function resolveFindToolsTier(explicit?: string): FindToolsTier {
+  const v = (explicit ?? process.env.OMP_FIND_TOOLS ?? "").trim().toLowerCase();
+  return v === "full" ? "full" : "core";
 }
 
 function text(t: string): { content: Array<{ type: string; text: string }> } {
@@ -78,10 +132,14 @@ function callerCertainty(symbol: string, rowText: string, ignoreCase: boolean): 
   if (new RegExp(`(?:import|from|require|use|include)\\b[^\n]*\\b${esc}\\b`, flags).test(rowText)) return "exact";
   return "possible";
 }
-/** Tag possible caller rows; the match row renders first, context rows stay indented. */
-function tagCallerRows(symbol: string, m: { path: string; line: number; col: number; text: string; before?: string[]; after?: string[] }, ignoreCase: boolean): string[] {
+/** Tag possible caller rows; the match row renders first, context rows stay indented.
+ * With showDepth (ffcallers depth 2|3) each ring is labeled `depth:N` first.
+ * Certainty is judged against the ring's own symbol (`via`, falling back to the
+ * query) so transitive import/call sites stay exact instead of mistagging. */
+function tagCallerRows(symbol: string, m: { path: string; line: number; col: number; text: string; before?: string[]; after?: string[]; depth?: number; via?: string }, ignoreCase: boolean, showDepth = false): string[] {
   const rows = renderGrepRows(m);
-  if (callerCertainty(symbol, m.text, ignoreCase) === "possible") rows[0] = `[possible] ${rows[0]}`;
+  if (showDepth && typeof m.depth === "number") rows[0] = `depth:${m.depth} ${rows[0]}`;
+  if (callerCertainty(m.via ?? symbol, m.text, ignoreCase) === "possible") rows[0] = `[possible] ${rows[0]}`;
   return rows;
 }
 
@@ -189,6 +247,24 @@ function renderGrepRows(m: { path: string; line: number; col: number; text: stri
   for (let i = 0; i < after.length; i++) rows.push(`  ${disp}:${m.line + i + 1}: ${after[i]}`);
   return rows;
 }
+/** Expand knob: only "function" enables enclosing-symbol attribution, anything else is "none". */
+function expandParam(params: Record<string, unknown>): "none" | "function" {
+  return strParam(params, "expand") === "function" ? "function" : "none";
+}
+/** Interleave `in <kind> <name>` attribution headers over one page of matches
+(consecutive same-symbol headers collapse to one; untagged matches stay bare).
+Approximate and line-anchored — confirm with read. */
+function renderExpandedGrepRows(page: Array<{ path: string; line: number; col: number; text: string; before?: string[]; after?: string[]; enclosing?: { kind: string; name: string } }>): string[] {
+  const out: string[] = [];
+  let last = "";
+  for (const m of page) {
+    const head = m.enclosing ? `in ${m.enclosing.kind} ${m.enclosing.name}` : "";
+    if (head !== "" && head !== last) out.push(head);
+    last = head;
+    out.push(...renderGrepRows(m));
+  }
+  return out;
+}
 /** Core findScanned shape (newer core); older cores expose findPaths only. */
 interface FindScanLike { paths: unknown[]; scanned?: unknown; backend?: unknown }
 type FindScannedFn = (query: string, opts: { cwd?: string; limit: number; offset: number }) => Promise<unknown>;
@@ -239,6 +315,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
   if (!search?.findPaths || !search?.grepContents) return;
   const mode = resolveFindMode(opts.mode, opts.cwd ?? process.cwd());
   const isOverride = mode === "override";
+  const tier = resolveFindToolsTier(opts.tools);
   // Canonical host form is the single object {name, label, ...}: registerTool(tool)
   // (verified against the omp host ExtensionAPI types — no (name, def) arity exists).
   const register = (name: string, label: string, def: Record<string, unknown>): void => {
@@ -268,6 +345,9 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
       additionalProperties: false,
     },
     execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+      const t0 = Date.now();
+      let statBackend: string | undefined = undefined;
+      let statTimeout = false;
       try {
         let query: string, limit: number, offset: number, cwd: string | undefined, maxChars: number | undefined, concise: boolean;
         let all: string[];
@@ -308,6 +388,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const ranked = await Promise.all(all.map(async (p) => ({ p, s: await safeScore(frecency, p) })));
         ranked.sort((a, b) => b.s - a.s); // stable: frecency first, fuzzy order otherwise
         const total = ranked.length;
+        statBackend = backend;
         if (bound !== undefined && snapshotMismatch(bound, { total, backend })) return staleCursor(toolName);
         const page = ranked.slice(offset, offset + limit);
         const lines = page.map((r) => toDisplay(r.p));
@@ -331,7 +412,10 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         if (!concise) lines.push(...nudge("find", total));
         return withDetails(lines.join("\n"), details);
       } catch (err) {
+        if (/timed out/i.test(errMsg(err))) statTimeout = true;
         return text(`${toolName} failed: ${errMsg(err)}`);
+      } finally {
+        recordCall("find", Date.now() - t0, statBackend, statTimeout);
       }
     },
   });
@@ -358,6 +442,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         cursor: { type: "string", description: "Opaque pagination cursor from a previous call" },
         contextBefore: { type: "number", description: "Context lines before each match (default 0, max 5)" },
         contextAfter: { type: "number", description: "Context lines after each match (default 0, max 5)" },
+        expand: { type: "string", description: "Enclosing-symbol attribution: 'function' adds an 'in <kind> <name>' header per match via an outline pass (default 'none') — approximate, line-anchored" },
         maxChars: { type: "number", description: "Max output chars; when exceeded returns per-file counts instead of rows" },
         concise: { type: "boolean", description: "Concise path:line rows (default false) — existence probe without text; ignores context params" },
       },
@@ -365,10 +450,13 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
       additionalProperties: false,
     },
     execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+      const t0 = Date.now();
+      let statBackend: string | undefined = undefined;
+      let statTimeout = false;
       try {
         let pattern: string, literal: boolean, ignoreCase: boolean, wholeWord: boolean, smartCase: boolean, pathFilter: string | undefined;
         let limit: number, offset: number, cwd: string | undefined;
-        let contextBefore: number, contextAfter: number, maxChars: number | undefined, concise: boolean;
+        let contextBefore: number, contextAfter: number, expand: "none" | "function", maxChars: number | undefined, concise: boolean;
         const cursorId = strParam(params, "cursor");
         let bound: Snapshot | undefined;
         if (cursorId) {
@@ -377,7 +465,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           pattern = st.pattern; literal = st.literal; ignoreCase = st.ignoreCase;
           wholeWord = st.wholeWord; smartCase = st.smartCase;
           pathFilter = st.pathFilter; limit = st.limit; offset = st.nextOffset; cwd = st.cwd;
-          contextBefore = st.contextBefore; contextAfter = st.contextAfter; maxChars = st.maxChars; concise = st.concise === true;
+          contextBefore = st.contextBefore; contextAfter = st.contextAfter; expand = st.expand === "function" ? "function" : "none"; maxChars = st.maxChars; concise = st.concise === true;
           bound = { total: st.total, backend: st.backend };
         } else {
           const p = strParam(params, "pattern");
@@ -393,28 +481,34 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           cwd = cwdParam(params);
           contextBefore = ctxParam(params, "contextBefore");
           contextAfter = ctxParam(params, "contextAfter");
+          expand = expandParam(params);
           maxChars = charsParam(params, "maxChars"); concise = params["concise"] === true;
         }
         // Path filters apply tools-side over the full result set: a bounded fetch
         // first would drop hits outside the page (false empty zero-states). Word
         // boundaries and totals likewise hold over the full set before slicing —
         // cursor paging re-fetches with the same flags, so limits never skew them.
-        // Context keys only travel when set: absence keeps the core call identical.
-        const pageOpts: { cwd?: string; literal: boolean; ignoreCase: boolean; wholeWord: boolean; smartCase: boolean; limit: number; offset: number; contextBefore?: number; contextAfter?: number } =
+        // Context and expand keys only travel when set: absence keeps the core call identical.
+        const pageOpts: { cwd?: string; literal: boolean; ignoreCase: boolean; wholeWord: boolean; smartCase: boolean; limit: number; offset: number; contextBefore?: number; contextAfter?: number; expand?: "none" | "function" } =
           { cwd, literal, ignoreCase, wholeWord, smartCase, limit, offset };
         if (!concise && contextBefore > 0) pageOpts.contextBefore = contextBefore;
         if (!concise && contextAfter > 0) pageOpts.contextAfter = contextAfter;
+        if (!concise && expand === "function") pageOpts.expand = expand;
         const res = await search.grepContents(pattern, pathFilter ? { cwd, literal, ignoreCase, wholeWord, smartCase } : pageOpts);
         const pool = pathFilter ? applyPathFilter(res.matches.map((m) => m.path), pathFilter, search.globToRegExp) : null;
         const matches = pool === null ? res.matches : res.matches.filter((m) => pool.includes(m.path));
         const total = pool === null ? res.total : matches.length;
         const liveBackend = typeof res.backend === "string" ? res.backend : undefined;
+        statBackend = liveBackend;
         if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend })) return staleCursor(toolName);
         const page = pool === null ? matches : matches.slice(offset, offset + limit);
         if (!concise && pool !== null && (contextBefore > 0 || contextAfter > 0) && typeof search.attachContext === "function") {
           await search.attachContext(cwd, page, contextBefore, contextAfter);
         }
-        const lines = concise ? page.map((m) => `${toDisplay(m.path)}:${m.line}`) : page.flatMap((m) => renderGrepRows(m));
+        if (!concise && expand === "function" && pool !== null && typeof search.attachEnclosing === "function") {
+          await search.attachEnclosing(cwd, page);
+        }
+        const lines = concise ? page.map((m) => `${toDisplay(m.path)}:${m.line}`) : expand === "function" ? renderExpandedGrepRows(page) : page.flatMap((m) => renderGrepRows(m));
         if (total > 0 && overBudget(lines.join("\n"), maxChars)) {
           const byFile = new Map<string, number>();
           for (const m of matches) byFile.set(toDisplay(m.path), (byFile.get(toDisplay(m.path)) ?? 0) + 1);
@@ -430,13 +524,16 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const details = { totalMatched: total, totalFiles: new Set(matches.map((m) => m.path)).size, truncated: hasMore };
         if (hasMore) {
           const next = storeCursor({
-            kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, maxChars, concise, total, backend: liveBackend,
+            kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
           });
           lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
         }
         return withDetails(lines.join("\n"), details);
       } catch (err) {
+        if (/timed out/i.test(errMsg(err))) statTimeout = true;
         return text(`${toolName} failed: ${errMsg(err)}`);
+      } finally {
+        recordCall("grep", Date.now() - t0, statBackend, statTimeout);
       }
     },
   });
@@ -463,6 +560,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
       additionalProperties: false,
     },
     execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+      const t0 = Date.now();
       try {
         if (typeof search.outlineFile !== "function") return text(`${toolName} failed: outline unavailable`);
         let file: string, depth: number, limit: number, offset: number, cwd: string | undefined, maxChars: number | undefined, concise: boolean;
@@ -503,6 +601,8 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         return withDetails(lines.length > 0 ? lines.join("\n") : `No symbols found in ${disp} (approximate scan)`, details);
       } catch (err) {
         return text(`${toolName} failed: ${errMsg(err)}`);
+      } finally {
+        recordCall("outline", Date.now() - t0);
       }
     },
   });
@@ -525,21 +625,25 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         limit: { type: "number", description: "Max matches per page (default 30, max 50)" },
         cursor: { type: "string", description: "Opaque pagination cursor from a previous call" },
         exact_only: { type: "boolean", description: "Exact-only: drop possible mentions (member access `.SYM`, comments), keep import/call-paren sites" },
+        depth: { type: "number", description: "Caller depth 1|2|3 (default 1) — BFS over enclosing symbols for transitive callers; rows labeled depth:N; downstream callees out of scope" },
       },
       required: ["symbol"],
       additionalProperties: false,
     },
     execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+      const t0 = Date.now();
+      let statBackend: string | undefined = undefined;
+      let statTimeout = false;
       try {
-        if (typeof search.callersOf !== "function") return text(`${toolName} failed: callers unavailable`);
         let symbol: string, ignoreCase: boolean, pathFilter: string | undefined, exactOnly: boolean;
-        let limit: number, offset: number, cwd: string | undefined, maxChars: number | undefined;
+        let depth: 1 | 2 | 3, limit: number, offset: number, cwd: string | undefined, maxChars: number | undefined;
         let bound: Snapshot | undefined;
         const cursorId = strParam(params, "cursor");
         if (cursorId) {
           const st = cursors.get(cursorId);
           if (!st || st.kind !== "callers") return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
           symbol = st.symbol; ignoreCase = st.ignoreCase; pathFilter = st.pathFilter; exactOnly = st.exactOnly;
+          depth = st.depth === 2 ? 2 : st.depth === 3 ? 3 : 1;
           limit = st.limit; offset = st.nextOffset; cwd = st.cwd; maxChars = st.maxChars;
           bound = { total: st.total, backend: st.backend };
         } else {
@@ -549,39 +653,44 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           ignoreCase = params["ignoreCase"] === true;
           pathFilter = strParam(params, "path");
           exactOnly = params["exact_only"] === true;
+          depth = params["depth"] === 2 ? 2 : params["depth"] === 3 ? 3 : 1;
           limit = numParam(params, "limit") ?? GREP_PAGE;
           offset = 0;
           cwd = cwdParam(params);
           maxChars = charsParam(params, "maxChars");
         }
-        const res = await search.callersOf(symbol, { cwd, ignoreCase });
+        const res = depth > 1 ? await search.callersOf(symbol, { cwd, ignoreCase, depth }) : await search.callersOf(symbol, { cwd, ignoreCase });
         const pool = pathFilter ? applyPathFilter(res.matches.map((m) => m.path), pathFilter, search.globToRegExp) : null;
         const filtered = pool === null ? res.matches : res.matches.filter((m) => pool.includes(m.path));
-        const certain = exactOnly ? filtered.filter((m) => callerCertainty(symbol, m.text, ignoreCase) === "exact") : filtered;
+        const certain = exactOnly ? filtered.filter((m) => callerCertainty(m.via ?? symbol, m.text, ignoreCase) === "exact") : filtered;
         const ranked = await Promise.all(certain.map(async (m) => ({ m, s: await safeScore(frecency, m.path) })));
         ranked.sort((a, b) => b.s - a.s); // stable: frecency first, path order otherwise
         const total = ranked.length;
         const liveBackend = typeof res.backend === "string" ? res.backend : undefined;
+        statBackend = liveBackend;
         if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend })) return staleCursor(toolName);
         const page = ranked.slice(offset, offset + limit);
-        const lines = page.flatMap((r) => tagCallerRows(symbol, r.m, ignoreCase));
+        const lines = page.flatMap((r) => tagCallerRows(symbol, r.m, ignoreCase, depth > 1));
         if (total > 0 && overBudget(lines.join("\n"), maxChars)) {
           const byFile = new Map<string, number>();
           for (const r of ranked) byFile.set(toDisplay(r.m.path), (byFile.get(toDisplay(r.m.path)) ?? 0) + 1);
           return withDetails(`Matched ${total} approximate references to ${symbol} in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
         }
-        if (!exactOnly && total > 0 && certain.length > 0 && !certain.some((m) => callerCertainty(symbol, m.text, ignoreCase) === "exact")) {
+        if (!exactOnly && total > 0 && certain.length > 0 && !certain.some((m) => callerCertainty(m.via ?? symbol, m.text, ignoreCase) === "exact")) {
           lines.unshift(`note: no exact call/import sites for "${symbol}"; ${total} possible mention${total === 1 ? "" : "s"} — confirm with read`, "");
         }
         const hasMore = offset + page.length < total;
         const details = { totalMatched: total, totalFiles: new Set(certain.map((m) => m.path)).size, truncated: hasMore };
         if (hasMore) {
-          const next = storeCursor({ kind: "callers", symbol, ignoreCase, pathFilter, exactOnly, limit, nextOffset: offset + page.length, cwd, maxChars, total, backend: liveBackend });
+          const next = storeCursor({ kind: "callers", symbol, ignoreCase, pathFilter, exactOnly, depth, limit, nextOffset: offset + page.length, cwd, maxChars, total, backend: liveBackend });
           lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
         }
         return withDetails(lines.length > 0 ? lines.join("\n") : `No approximate references to ${symbol} found`, details);
       } catch (err) {
+        if (/timed out/i.test(errMsg(err))) statTimeout = true;
         return text(`${toolName} failed: ${errMsg(err)}`);
+      } finally {
+        recordCall("callers", Date.now() - t0, statBackend, statTimeout);
       }
     },
   });
@@ -613,6 +722,9 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
       additionalProperties: false,
     },
     execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+      const t0 = Date.now();
+      let statBackend: string | undefined = undefined;
+      let statTimeout = false;
       try {
         if (typeof search.structuralGrep !== "function" || typeof search.compileStructural !== "function" || typeof search.previewRewrite !== "function") return text(`${toolName} failed: structural unavailable`);
         let query: string, language: string | undefined, ignoreCase: boolean, pathFilter: string | undefined, rewrite: string | undefined;
@@ -653,6 +765,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         ranked.sort((a, b) => b.s - a.s); // stable: frecency first, scan order otherwise
         const total = ranked.length;
         const liveBackend = typeof res.backend === "string" ? res.backend : undefined;
+        statBackend = liveBackend;
         if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend })) return staleCursor(toolName);
         const page = ranked.slice(offset, offset + limit);
         let lines: string[];
@@ -681,7 +794,10 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         }
         return withDetails(lines.join("\n"), details);
       } catch (err) {
+        if (/timed out/i.test(errMsg(err))) statTimeout = true;
         return text(`${toolName} failed: ${errMsg(err)}`);
+      } finally {
+        recordCall("structural", Date.now() - t0, statBackend, statTimeout);
       }
     },
   });
@@ -703,12 +819,16 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
       additionalProperties: false,
     },
     execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+      const t0 = Date.now();
+      let statBackend: string | undefined = undefined;
+      let statTimeout = false;
       try {
         if (typeof search.rankMap !== "function") return text(`${toolName} failed: map unavailable`);
         const cwd = cwdParam(params);
         const scope = strParam(params, "path");
         const budget = charsParam(params, "maxChars") ?? 8000;
         const res = await search.rankMap({ cwd });
+        statBackend = res.backend;
         const pool = scope ? applyPathFilter(res.files.map((f) => f.path), scope, search.globToRegExp) : null;
         const files = pool === null ? res.files : res.files.filter((f) => pool.includes(f.path));
         const ranked = await Promise.all(files.map(async (f) => ({ f, s: (await safeScore(frecency, f.path)) + (f.modified ? 1 : 0) + Math.log1p(f.inDegree) })));
@@ -733,7 +853,10 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         if (omitted > 0) lines.push("", `... (${omitted} files omitted; raise maxChars or ffoutline <file>)`);
         return withDetails(lines.join("\n"), { totalMatched: shown.length, totalFiles: res.scanned, truncated: omitted > 0 });
       } catch (err) {
+        if (/timed out/i.test(errMsg(err))) statTimeout = true;
         return text(`${toolName} failed: ${errMsg(err)}`);
+      } finally {
+        recordCall("map", Date.now() - t0, statBackend, statTimeout);
       }
     },
   });
@@ -759,6 +882,9 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
       additionalProperties: false,
     },
     execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+      const t0 = Date.now();
+      let statBackend: string | undefined = undefined;
+      let statTimeout = false;
       try {
         if (typeof search.capsuleOf !== "function") return text(`${toolName} failed: capsule unavailable`);
         const s = strParam(params, "symbol");
@@ -769,6 +895,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const limit = numParam(params, "limit") ?? 10;
         const maxChars = charsParam(params, "maxChars");
         const res = await search.capsuleOf(s, { cwd, ignoreCase, pathFilter, limit });
+        statBackend = res.backend;
         const disp = (p: string): string => toDisplay(p);
         const lines: string[] = [];
         if (res.defFile !== undefined) lines.push(`symbol ${s} — ${res.defKind} in ${disp(res.defFile)}:${res.defLine}`);
@@ -803,7 +930,10 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         lines.push(guidance);
         return withDetails(lines.join("\n"), { totalMatched: res.found ? 1 : 0, totalFiles: res.filesInvolved, truncated: shrunk });
       } catch (err) {
+        if (/timed out/i.test(errMsg(err))) statTimeout = true;
         return text(`${toolName} failed: ${errMsg(err)}`);
+      } finally {
+        recordCall("capsule", Date.now() - t0, statBackend, statTimeout);
       }
     },
   });
@@ -827,6 +957,10 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
   if (typeof search.capsuleOf === "function") {
     register("ffcapsule", "Symbol dossier", capsuleDef("ffcapsule"));
     try { register("capsule", "Symbol dossier", capsuleDef("capsule")); } catch { /* alias where the host allows */ }
+  }
+  if (tier === "full") {
+    // Reserved: full adds nothing today — future tools register here so the
+    // default core surface stays lean.
   }
   if (isOverride) {
     register("find", "Find files", findDef("find"));

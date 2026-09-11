@@ -12,8 +12,8 @@ const MAX_GREP_BYTES = 2 * 1024 * 1024, MAX_GREP_SIZE = "2M";
 const GREP_TIMEOUT_DEFAULT = 30000;
 export interface ParsedFindQuery { fuzzy: string; dirPrefix?: string; extGlobs: string[]; excludes: string[]; gitModifiedOnly: boolean }
 export interface FindOptions { cwd?: string; limit?: number; offset?: number; scan?: string; followSymlinks?: boolean }
-export interface GrepOptions { cwd?: string; limit?: number; offset?: number; literal?: boolean; ignoreCase?: boolean; wholeWord?: boolean; smartCase?: boolean; scan?: string; followSymlinks?: boolean; timeoutMs?: number; contextBefore?: number; contextAfter?: number }
-export interface GrepMatch { path: string; line: number; col: number; text: string; before?: string[]; after?: string[] }
+export interface GrepOptions { cwd?: string; limit?: number; offset?: number; literal?: boolean; ignoreCase?: boolean; wholeWord?: boolean; smartCase?: boolean; scan?: string; followSymlinks?: boolean; timeoutMs?: number; contextBefore?: number; contextAfter?: number; expand?: "none" | "function" }
+export interface GrepMatch { path: string; line: number; col: number; text: string; before?: string[]; after?: string[]; enclosing?: { kind: string; name: string; line: number }; depth?: number; via?: string }
 export interface GrepResult { matches: GrepMatch[]; total: number; backend: ScanBackend }
 /** Which listing/grep backend served a call: rg when on PATH, otherwise the builtin walker. */
 export type ScanBackend = "rg" | "walker";
@@ -266,6 +266,35 @@ export async function attachContext(cwdDir: string | undefined, matches: GrepMat
     if (ca > 0) m.after = lines.slice(m.line, m.line + ca).map((t) => t.trim().slice(0, 500));
   }
 }
+/** Enclosing-symbol attribution (goldmine pick 8): one `outlineFile` depth-0
+pass per file-with-hits, each match attributed to the nearest symbol at/above
+its line. Outline misses (unreadable/binary/symbol-free files) leave the match
+untagged — never throws. Only runs on request (`expand: "function"`). */
+export async function attachEnclosing(cwdDir: string | undefined, matches: GrepMatch[]): Promise<void> {
+  if (matches.length === 0) return;
+  const cwd = path.resolve(cwdDir ?? process.cwd());
+  const byFile = new Map<string, GrepMatch[]>();
+  for (const m of matches) {
+    const bucket = byFile.get(m.path);
+    if (bucket) bucket.push(m);
+    else byFile.set(m.path, [m]);
+  }
+  for (const [file, ms] of byFile) {
+    let symbols: OutlineSymbol[];
+    try {
+      symbols = (await outlineFile(file, { cwd, depth: 0 })).symbols;
+    } catch { continue; }
+    if (symbols.length === 0) continue;
+    for (const m of ms) {
+      let best: OutlineSymbol | undefined;
+      for (const s of symbols) {
+        if (s.line <= m.line) best = s;
+        else break;
+      }
+      if (best) m.enclosing = { kind: best.kind, name: best.name, line: best.line };
+    }
+  }
+}
 export async function grepContents(pattern: string, opts: GrepOptions = {}): Promise<GrepResult> {
   const cwd = path.resolve(opts.cwd ?? process.cwd());
   guardCwd(cwd);
@@ -300,37 +329,106 @@ export async function grepContents(pattern: string, opts: GrepOptions = {}): Pro
     });
     const res = await Promise.race([run, overdue]);
     await attachContext(opts.cwd, res.matches, opts.contextBefore ?? 0, opts.contextAfter ?? 0);
+    if (opts.expand === "function") await attachEnclosing(opts.cwd, res.matches);
     return res;
   } finally {
     clearTimeout(timer);
   }
 }
-export interface CallersOptions { cwd?: string; limit?: number; offset?: number; ignoreCase?: boolean; scan?: string; followSymlinks?: boolean; timeoutMs?: number; contextBefore?: number; contextAfter?: number }
+export interface CallersOptions { cwd?: string; limit?: number; offset?: number; ignoreCase?: boolean; scan?: string; followSymlinks?: boolean; timeoutMs?: number; contextBefore?: number; contextAfter?: number; depth?: 1 | 2 | 3 }
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-/** Approximate "who calls X": literal-aware text heuristics (call parens, import
-lines, member access), merged/deduped by path:line. Explicitly NOT LSP-accurate:
-same-named locals and comments can match; definition lines are filtered out.
-Callers confirm hits with read. */
-export async function callersOf(symbol: string, opts: CallersOptions = {}): Promise<GrepResult> {
-  const cwd = path.resolve(opts.cwd ?? process.cwd());
-  guardCwd(cwd);
-  if (!symbol) throw new Error("callers symbol must not be empty");
-  const esc = escapeRegExp(symbol);
+/** One ring of the callers matcher: the 3 text-heuristic patterns for a single
+symbol, definition lines filtered, merged/deduped into `seen` (visited
+`path:line` set doubles as the BFS cycle guard). Hard-capped by GREP_CAP. */
+async function directCallers(sym: string, base: { cwd?: string; ignoreCase: boolean; scan?: string; followSymlinks?: boolean; timeoutMs?: number }, seen: Map<string, GrepMatch>, ring: number): Promise<{ backend: ScanBackend; fresh: GrepMatch[] }> {
+  const esc = escapeRegExp(sym);
   const patterns = [`\\b${esc}\\s*\\(`, `(?:import|from|require|use|include)\\b[^\\n]*\\b${esc}\\b`, `\\.${esc}\\b`];
   const defRe = new RegExp(`^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+)*(?:function|def|fn|func|class)\\b[^\\n]*\\b${esc}\\b`);
-  const seen = new Map<string, GrepMatch>();
-  const base = { cwd: opts.cwd, ignoreCase: opts.ignoreCase ?? false, scan: opts.scan, followSymlinks: opts.followSymlinks, timeoutMs: opts.timeoutMs };
   let backend: ScanBackend = "rg";
+  const fresh: GrepMatch[] = [];
   for (const p of patterns) {
     const r = await grepContents(p, { ...base, literal: false });
     backend = r.backend;
     for (const m of r.matches) {
       if (defRe.test(m.text)) continue;
       const key = `${m.path}:${m.line}`;
-      if (!seen.has(key)) seen.set(key, m);
+      if (seen.has(key)) continue;
+      if (seen.size >= GREP_CAP) return { backend, fresh };
+      m.depth = ring;
+      m.via = sym;
+      seen.set(key, m);
+      fresh.push(m);
     }
+    if (seen.size >= GREP_CAP) break;
+  }
+  return { backend, fresh };
+}
+/** Enclosing depth-1 symbol names for a ring of caller sites (outline misses
+yield nothing — import-level and module-scope sites simply expand no further). */
+async function enclosingNames(cwdDir: string | undefined, sites: GrepMatch[]): Promise<string[]> {
+  if (sites.length === 0) return [];
+  const cwd = path.resolve(cwdDir ?? process.cwd());
+  const byFile = new Map<string, GrepMatch[]>();
+  for (const m of sites) {
+    const bucket = byFile.get(m.path);
+    if (bucket) bucket.push(m);
+    else byFile.set(m.path, [m]);
+  }
+  const names: string[] = [];
+  for (const [file, ms] of byFile) {
+    let symbols: OutlineSymbol[];
+    try {
+      symbols = (await outlineFile(file, { cwd, depth: 1 })).symbols;
+    } catch { continue; }
+    for (const m of ms) {
+      let best: OutlineSymbol | undefined;
+      for (const s of symbols) {
+        if (s.line <= m.line) best = s;
+        else break;
+      }
+      if (best && best.name) names.push(best.name);
+    }
+  }
+  return names;
+}
+/** Approximate "who calls X": literal-aware text heuristics (call parens, import
+lines, member access), merged/deduped by path:line. Explicitly NOT LSP-accurate:
+same-named locals and comments can match; definition lines are filtered out.
+Callers confirm hits with read. `depth` 2|3 BFS-transitively follows each ring's
+enclosing symbols (cycle-guarded by the visited path:line set, rings labeled
+`depth:N` on every row, hard-capped by GREP_CAP); downstream callees are out of
+scope. Default 1 keeps the single-ring shape. */
+export async function callersOf(symbol: string, opts: CallersOptions = {}): Promise<GrepResult> {
+  const cwd = path.resolve(opts.cwd ?? process.cwd());
+  guardCwd(cwd);
+  if (!symbol) throw new Error("callers symbol must not be empty");
+  const depth = opts.depth === 2 ? 2 : opts.depth === 3 ? 3 : 1;
+  const seen = new Map<string, GrepMatch>();
+  const base = { cwd: opts.cwd, ignoreCase: opts.ignoreCase ?? false, scan: opts.scan, followSymlinks: opts.followSymlinks, timeoutMs: opts.timeoutMs };
+  let backend: ScanBackend = "rg";
+  const queried = new Set<string>([opts.ignoreCase === true ? symbol.toLowerCase() : symbol]);
+  let frontier: string[] = [symbol];
+  for (let ring = 1; ring <= depth && frontier.length > 0 && seen.size < GREP_CAP; ring++) {
+    const ringFresh: GrepMatch[] = [];
+    const next: string[] = [];
+    for (const sym of frontier) {
+      const r = await directCallers(sym, base, seen, ring);
+      backend = r.backend;
+      ringFresh.push(...r.fresh);
+      if (seen.size >= GREP_CAP) break;
+    }
+    if (ring < depth && seen.size < GREP_CAP) {
+      for (const name of await enclosingNames(opts.cwd, ringFresh)) {
+        const key = opts.ignoreCase === true ? name.toLowerCase() : name;
+        if (!queried.has(key)) {
+          queried.add(key);
+          next.push(name);
+        }
+      }
+    }
+    frontier = next;
   }
   const merged = [...seen.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line));
   const page = pageOf(merged, opts.limit, opts.offset);

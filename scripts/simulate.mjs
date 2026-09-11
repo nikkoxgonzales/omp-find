@@ -275,6 +275,33 @@ await scenario('stale cursor refuses a shifted page', async () => {
   assert(/results changed since page 1; re-run without cursor/.test(resumed), `stale cursor silently re-paged:\n${resumed}`);
   return 'total mismatch → restart guidance, never a shifted page';
 });
+await scenario('ffgrep expand:function attribution headers', async () => {
+  const out = await callTool('ffgrep', { pattern: 'parseFindQuery', path: 'src/server.py', cwd: tree, expand: 'function' });
+  assert(out.includes('in def serve'), `attribution header missing:\n${out}`);
+  assert(out.includes('server.py'), `match rows missing:\n${out}`);
+  const bare = await callTool('ffgrep', { pattern: 'parseFindQuery', path: 'src/server.py', cwd: tree });
+  assert(!bare.includes('in def serve'), `default grew a header:\n${bare}`);
+  return 'opt-in enclosing-symbol headers, default rows unchanged';
+});
+
+await scenario('ffcallers depth:2 transitive ring', async () => {
+  await writeFile(join(tree, 'src', 'zzq_wrap.py'), [
+    'from server import serve',
+    '',
+    'def zzq_wrap():',
+    '    return serve()',
+    '',
+  ].join('\n'));
+  const flat = await callTool('ffcallers', { symbol: 'parseFindQuery', cwd: tree });
+  assert(!flat.includes('depth:'), `default grew ring labels:\n${flat}`);
+  const deep = await callTool('ffcallers', { symbol: 'parseFindQuery', cwd: tree, depth: 2 });
+  show('ffcallers depth 2', deep);
+  const fwd = deep.replace(/\\/g, '/');
+  assert(fwd.includes('zzq_wrap.py'), `transitive caller missing:\n${deep}`);
+  assert(/depth:2 /.test(fwd), `ring-2 rows unlabeled:\n${deep}`);
+  assert(/depth:1 /.test(fwd), `ring-1 rows unlabeled:\n${deep}`);
+  return 'transitive callers labeled per ring, default depth 1 unchanged';
+});
 
 await scenario('ffstructural pattern + references + cursor + approx labels', async () => {
   const pat = await callTool('ffstructural', { pattern: 'parseFindQuery($$$)', path: 'src/', cwd: tree });

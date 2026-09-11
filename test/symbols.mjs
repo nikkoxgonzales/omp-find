@@ -329,3 +329,184 @@ describe('tools: ffoutline and ffcallers', () => {
     await rm(many, { recursive: true, force: true });
   });
 });
+
+describe('grepContents expand:function attribution (goldmine pick 8)', () => {
+  const TREE = {
+    'a.ts': 'export function foo() {\n  const x = 1;\n  return x;\n}\n\nexport function bar() {\n  const y = 2;\n  return y;\n}\n',
+    'plain.txt': 'just some text\nnothing symbolic here\n',
+  };
+  it('attributes each match to the nearest depth-0 symbol at/above its line', async () => {
+    const root = await fixture(TREE);
+    try {
+      const res = await search.grepContents('const', { cwd: root, scan: 'mock', expand: 'function' });
+      const byLine = new Map(res.matches.filter((m) => slash(m.path) === 'a.ts').map((m) => [m.line, m]));
+      assert.deepEqual(byLine.get(2).enclosing, { kind: 'function', name: 'foo', line: 1 });
+      assert.deepEqual(byLine.get(7).enclosing, { kind: 'function', name: 'bar', line: 6 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('default none leaves matches untagged (existing default unchanged)', async () => {
+    const root = await fixture(TREE);
+    try {
+      for (const opts of [{ cwd: root, scan: 'mock' }, { cwd: root, scan: 'mock', expand: 'none' }]) {
+        const res = await search.grepContents('const', opts);
+        assert.ok(res.matches.length > 0, 'hits present');
+        assert.ok(res.matches.every((m) => m.enclosing === undefined), 'no attribution without expand');
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('outline-miss files fall back cleanly: no throw, no tag', async () => {
+    const root = await fixture(TREE);
+    try {
+      const res = await search.grepContents('symbolic', { cwd: root, scan: 'mock', expand: 'function' });
+      assert.equal(res.matches.length, 1);
+      assert.equal(res.matches[0].enclosing, undefined);
+      await search.attachEnclosing(root, [{ path: 'nope-missing.ts', line: 3, col: 1, text: 'x' }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('callersOf depth (goldmine pick 9)', () => {
+  const CHAIN = {
+    'leaf.ts': 'export function leaf() { return 1; }\n',
+    'mid.ts': 'import { leaf } from "./leaf";\nexport function mid() {\n  return leaf();\n}\n',
+    'top.ts': 'import { mid } from "./mid";\nexport function top() {\n  return mid();\n}\n',
+  };
+  const rows = (res) => res.matches.map((m) => `${slash(m.path)}:${m.line}:d${m.depth}`);
+  it('depth default and 1 agree; every row is ring 1', async () => {
+    const root = await fixture(CHAIN);
+    try {
+      const dflt = await search.callersOf('leaf', { cwd: root, scan: 'mock' });
+      const one = await search.callersOf('leaf', { cwd: root, scan: 'mock', depth: 1 });
+      assert.deepEqual(rows(one), rows(dflt));
+      assert.ok(dflt.matches.length > 0, 'direct callers found');
+      assert.ok(dflt.matches.every((m) => m.depth === 1), 'all ring 1');
+      assert.ok(rows(dflt).includes('mid.ts:3:d1'), rows(dflt).join(','));
+      assert.ok(!rows(dflt).some((r) => r.startsWith('top.ts')), 'no transitive ring at depth 1');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('depth 2 finds the transitive caller with ring labels', async () => {
+    const root = await fixture(CHAIN);
+    try {
+      const res = await search.callersOf('leaf', { cwd: root, scan: 'mock', depth: 2 });
+      const r = rows(res);
+      assert.ok(r.includes('mid.ts:3:d1'), r.join(','));
+      assert.ok(r.includes('top.ts:3:d2'), `transitive caller:\n${r.join('\n')}`);
+      assert.ok(res.matches.every((m) => m.depth === 1 || m.depth === 2), 'rings labeled');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('cycles terminate: mutual recursion resolves instead of looping', async () => {
+    const root = await fixture({
+      'a.ts': 'import { b } from "./b";\nexport function a() {\n  return b();\n}\n',
+      'b.ts': 'import { a } from "./a";\nexport function b() {\n  return a();\n}\n',
+    });
+    try {
+      const res = await search.callersOf('a', { cwd: root, scan: 'mock', depth: 3 });
+      const r = rows(res);
+      assert.ok(r.includes('b.ts:3:d1'), r.join(','));
+      assert.ok(r.includes('a.ts:3:d2'), `back edge:\n${r.join('\n')}`);
+      assert.equal(new Set(res.matches.map((m) => `${slash(m.path)}:${m.line}`)).size, res.matches.length, 'deduped');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('merged rings respect the GREP_CAP hard ceiling', async () => {
+    const root = await fixture({ 'big.ts': `${'cap();\n'.repeat(25000)}` });
+    try {
+      const res = await search.callersOf('cap', { cwd: root, depth: 2 });
+      assert.ok(res.total <= 20000, `cap respected: ${res.total}`);
+      assert.ok(res.total > 0, 'hits present');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('tools: ffgrep expand + ffcallers depth', () => {
+  const stubFrecency = { score: async () => 0, recordOpen: async () => {} };
+  const TREE = {
+    'a.ts': 'export function foo() {\n  const x = 1;\n  return x;\n}\n\nexport function bar() {\n  const y = 2;\n  return y;\n}\n',
+    'leaf.ts': 'export function leaf() { return 1; }\n',
+    'mid.ts': 'import { leaf } from "./leaf";\nexport function mid() {\n  return leaf();\n}\n',
+    'top.ts': 'import { mid } from "./mid";\nexport function top() {\n  return mid();\n}\n',
+  };
+  it('ffgrep expand:function renders in <kind> <name> headers; default stays bare', async () => {
+    const root = await fixture(TREE);
+    try {
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency: stubFrecency }, { mode: 'additive' });
+      const out = textOf(await pi.tools.get('ffgrep').execute('t', { pattern: 'const', cwd: root, expand: 'function' }));
+      assert.ok(out.includes('in function foo'), `attribution header:\n${out}`);
+      assert.ok(out.includes('in function bar'), `second header:\n${out}`);
+      const bare = textOf(await pi.tools.get('ffgrep').execute('t', { pattern: 'const', cwd: root }));
+      assert.ok(!bare.includes('in function '), `default unchanged:\n${bare}`);
+      const concise = textOf(await pi.tools.get('ffgrep').execute('t', { pattern: 'const', cwd: root, expand: 'function', concise: true }));
+      assert.ok(!concise.includes('in function '), `concise stays a probe:\n${concise}`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('ffgrep carries expand across cursor pages', async () => {
+    const root = await fixture(TREE);
+    try {
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency: stubFrecency }, { mode: 'additive' });
+      const p1 = textOf(await pi.tools.get('ffgrep').execute('t', { pattern: 'const', cwd: root, expand: 'function', limit: 1 }));
+      const c = cursorOf({ content: [{ type: 'text', text: p1 }] });
+      assert.ok(c, 'grep advertises a cursor');
+      const p2 = textOf(await pi.tools.get('ffgrep').execute('t', { cursor: c }));
+      assert.ok(p2.includes('in function '), `cursor keeps expand:\n${p2}`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('ffcallers depth:2 labels each ring; default rows stay unlabeled', async () => {
+    const root = await fixture(TREE);
+    try {
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency: stubFrecency }, { mode: 'additive' });
+      const deep = textOf(await pi.tools.get('ffcallers').execute('t', { symbol: 'leaf', cwd: root, depth: 2 }));
+      assert.ok(deep.includes('top.ts:3:'), `transitive caller:\n${deep}`);
+      assert.ok(deep.includes('depth:2 top.ts:3:'), `ring label:\n${deep}`);
+      assert.ok(deep.includes('depth:1 mid.ts:3:'), `ring-1 label:\n${deep}`);
+      const flat = textOf(await pi.tools.get('ffcallers').execute('t', { symbol: 'leaf', cwd: root }));
+      assert.ok(!flat.includes('depth:'), `default unchanged:\n${flat}`);
+      const exactDeep = textOf(await pi.tools.get('ffcallers').execute('t', { symbol: 'leaf', cwd: root, depth: 2, exact_only: true }));
+      assert.ok(exactDeep.includes('top.ts:3:'), `exact_only keeps transitive call sites:\n${exactDeep}`);
+      assert.ok(!exactDeep.includes('[possible]'), `transitive rows judge certainty by their own ring:\n${exactDeep}`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('ffcallers carries depth across cursor pages', async () => {
+    const root = await fixture(TREE);
+    try {
+      const pi = fakePi();
+      findTools.registerFindTools(pi, { search, frecency: stubFrecency }, { mode: 'additive' });
+      const p1 = textOf(await pi.tools.get('ffcallers').execute('t', { symbol: 'leaf', cwd: root, depth: 2, limit: 1 }));
+      const c = cursorOf({ content: [{ type: 'text', text: p1 }] });
+      assert.ok(c, 'callers advertises a cursor');
+      const p2 = textOf(await pi.tools.get('ffcallers').execute('t', { cursor: c }));
+      assert.ok(/depth:[12] /.test(p2), `cursor keeps depth:\n${p2}`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

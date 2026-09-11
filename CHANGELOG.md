@@ -3,6 +3,21 @@
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
 
+## [0.7.0]
+
+### Added
+
+- `expand: "function"` on `ffgrep`: per-match enclosing-symbol attribution (`enclosing: { kind, name, line }` via depth-0 outline, best-effort, never throws).
+- `depth: 1 | 2 | 3` on `ffcallers`: BFS-transitive caller rings with `depth:N` on every row, hard-capped by `GREP_CAP`.
+- Session-stats block on `/find-health` (in-memory per-tool call counters) with counter reset on `/find-rescan`.
+- `OMP_FIND_TOOLS=core|full` tier gate (default `core`; `full` reserved for the wider surface).
+- README hot-files/explain recipes.
+- Installed-surface simulator grows to 18 scenarios (expand + depth-ring coverage).
+
+### Changed
+
+- README + `docs/extension.md` mirror the new params, session stats, and tier gate.
+
 ## [0.6.0]
 
 ### Added

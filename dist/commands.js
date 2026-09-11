@@ -5,7 +5,9 @@
  * compiles before the core worker (`search.ts`, `frecency.ts`) lands.
  * Every core call is optional-chained with a plain-text fallback, and
  * `ctx.ui.notify` itself is best-effort.
+ * Session stats come from the tools module (in-memory counters, reset on rescan).
  */
+import { sessionStatsText, resetSessionStats } from "./tools.js";
 function notify(ctx, text, kind) {
     try {
         ctx?.ui?.notify?.(text, kind);
@@ -58,6 +60,7 @@ function healthText(deps) {
         lines.push(`frecency: error (${err instanceof Error ? err.message : String(err)})`);
         kind = "error";
     }
+    lines.push(sessionStatsText());
     return { text: lines.join("\n"), kind };
 }
 async function rescanText(deps) {
@@ -84,6 +87,7 @@ async function rescanText(deps) {
     catch (err) {
         return `/find-rescan failed (frecency): ${err instanceof Error ? err.message : String(err)}`;
     }
+    resetSessionStats();
     return dropped.length === 0 ? 'caches dropped (nothing cached)' : `caches dropped: ${dropped.join(', ')}`;
 }
 export function registerFindCommands(pi, deps = {}) {

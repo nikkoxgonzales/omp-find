@@ -367,6 +367,45 @@ export async function attachContext(cwdDir, matches, before, after) {
             m.after = lines.slice(m.line, m.line + ca).map((t) => t.trim().slice(0, 500));
     }
 }
+/** Enclosing-symbol attribution (goldmine pick 8): one `outlineFile` depth-0
+pass per file-with-hits, each match attributed to the nearest symbol at/above
+its line. Outline misses (unreadable/binary/symbol-free files) leave the match
+untagged — never throws. Only runs on request (`expand: "function"`). */
+export async function attachEnclosing(cwdDir, matches) {
+    if (matches.length === 0)
+        return;
+    const cwd = path.resolve(cwdDir ?? process.cwd());
+    const byFile = new Map();
+    for (const m of matches) {
+        const bucket = byFile.get(m.path);
+        if (bucket)
+            bucket.push(m);
+        else
+            byFile.set(m.path, [m]);
+    }
+    for (const [file, ms] of byFile) {
+        let symbols;
+        try {
+            symbols = (await outlineFile(file, { cwd, depth: 0 })).symbols;
+        }
+        catch {
+            continue;
+        }
+        if (symbols.length === 0)
+            continue;
+        for (const m of ms) {
+            let best;
+            for (const s of symbols) {
+                if (s.line <= m.line)
+                    best = s;
+                else
+                    break;
+            }
+            if (best)
+                m.enclosing = { kind: best.kind, name: best.name, line: best.line };
+        }
+    }
+}
 export async function grepContents(pattern, opts = {}) {
     const cwd = path.resolve(opts.cwd ?? process.cwd());
     guardCwd(cwd);
@@ -417,6 +456,8 @@ export async function grepContents(pattern, opts = {}) {
         });
         const res = await Promise.race([run, overdue]);
         await attachContext(opts.cwd, res.matches, opts.contextBefore ?? 0, opts.contextAfter ?? 0);
+        if (opts.expand === "function")
+            await attachEnclosing(opts.cwd, res.matches);
         return res;
     }
     finally {
@@ -426,21 +467,15 @@ export async function grepContents(pattern, opts = {}) {
 function escapeRegExp(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-/** Approximate "who calls X": literal-aware text heuristics (call parens, import
-lines, member access), merged/deduped by path:line. Explicitly NOT LSP-accurate:
-same-named locals and comments can match; definition lines are filtered out.
-Callers confirm hits with read. */
-export async function callersOf(symbol, opts = {}) {
-    const cwd = path.resolve(opts.cwd ?? process.cwd());
-    guardCwd(cwd);
-    if (!symbol)
-        throw new Error("callers symbol must not be empty");
-    const esc = escapeRegExp(symbol);
+/** One ring of the callers matcher: the 3 text-heuristic patterns for a single
+symbol, definition lines filtered, merged/deduped into `seen` (visited
+`path:line` set doubles as the BFS cycle guard). Hard-capped by GREP_CAP. */
+async function directCallers(sym, base, seen, ring) {
+    const esc = escapeRegExp(sym);
     const patterns = [`\\b${esc}\\s*\\(`, `(?:import|from|require|use|include)\\b[^\\n]*\\b${esc}\\b`, `\\.${esc}\\b`];
     const defRe = new RegExp(`^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+)*(?:function|def|fn|func|class)\\b[^\\n]*\\b${esc}\\b`);
-    const seen = new Map();
-    const base = { cwd: opts.cwd, ignoreCase: opts.ignoreCase ?? false, scan: opts.scan, followSymlinks: opts.followSymlinks, timeoutMs: opts.timeoutMs };
     let backend = "rg";
+    const fresh = [];
     for (const p of patterns) {
         const r = await grepContents(p, { ...base, literal: false });
         backend = r.backend;
@@ -448,9 +483,95 @@ export async function callersOf(symbol, opts = {}) {
             if (defRe.test(m.text))
                 continue;
             const key = `${m.path}:${m.line}`;
-            if (!seen.has(key))
-                seen.set(key, m);
+            if (seen.has(key))
+                continue;
+            if (seen.size >= GREP_CAP)
+                return { backend, fresh };
+            m.depth = ring;
+            m.via = sym;
+            seen.set(key, m);
+            fresh.push(m);
         }
+        if (seen.size >= GREP_CAP)
+            break;
+    }
+    return { backend, fresh };
+}
+/** Enclosing depth-1 symbol names for a ring of caller sites (outline misses
+yield nothing — import-level and module-scope sites simply expand no further). */
+async function enclosingNames(cwdDir, sites) {
+    if (sites.length === 0)
+        return [];
+    const cwd = path.resolve(cwdDir ?? process.cwd());
+    const byFile = new Map();
+    for (const m of sites) {
+        const bucket = byFile.get(m.path);
+        if (bucket)
+            bucket.push(m);
+        else
+            byFile.set(m.path, [m]);
+    }
+    const names = [];
+    for (const [file, ms] of byFile) {
+        let symbols;
+        try {
+            symbols = (await outlineFile(file, { cwd, depth: 1 })).symbols;
+        }
+        catch {
+            continue;
+        }
+        for (const m of ms) {
+            let best;
+            for (const s of symbols) {
+                if (s.line <= m.line)
+                    best = s;
+                else
+                    break;
+            }
+            if (best && best.name)
+                names.push(best.name);
+        }
+    }
+    return names;
+}
+/** Approximate "who calls X": literal-aware text heuristics (call parens, import
+lines, member access), merged/deduped by path:line. Explicitly NOT LSP-accurate:
+same-named locals and comments can match; definition lines are filtered out.
+Callers confirm hits with read. `depth` 2|3 BFS-transitively follows each ring's
+enclosing symbols (cycle-guarded by the visited path:line set, rings labeled
+`depth:N` on every row, hard-capped by GREP_CAP); downstream callees are out of
+scope. Default 1 keeps the single-ring shape. */
+export async function callersOf(symbol, opts = {}) {
+    const cwd = path.resolve(opts.cwd ?? process.cwd());
+    guardCwd(cwd);
+    if (!symbol)
+        throw new Error("callers symbol must not be empty");
+    const depth = opts.depth === 2 ? 2 : opts.depth === 3 ? 3 : 1;
+    const seen = new Map();
+    const base = { cwd: opts.cwd, ignoreCase: opts.ignoreCase ?? false, scan: opts.scan, followSymlinks: opts.followSymlinks, timeoutMs: opts.timeoutMs };
+    let backend = "rg";
+    const queried = new Set([opts.ignoreCase === true ? symbol.toLowerCase() : symbol]);
+    let frontier = [symbol];
+    for (let ring = 1; ring <= depth && frontier.length > 0 && seen.size < GREP_CAP; ring++) {
+        const ringFresh = [];
+        const next = [];
+        for (const sym of frontier) {
+            const r = await directCallers(sym, base, seen, ring);
+            backend = r.backend;
+            ringFresh.push(...r.fresh);
+            if (seen.size >= GREP_CAP)
+                break;
+        }
+        if (ring < depth && seen.size < GREP_CAP) {
+            for (const name of await enclosingNames(opts.cwd, ringFresh)) {
+                const key = opts.ignoreCase === true ? name.toLowerCase() : name;
+                if (!queried.has(key)) {
+                    queried.add(key);
+                    next.push(name);
+                }
+            }
+        }
+        frontier = next;
     }
     const merged = [...seen.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line));
     const page = pageOf(merged, opts.limit, opts.offset);

@@ -9,9 +9,9 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 ## Features
 
 - **`fffind`** — fuzzy file-path search over the live tree; exact and stem basename matches rank first.
-- **`ffgrep`** — content search, literal by default, regex when `literal=false`; `contextBefore`/`contextAfter` (max 5) disambiguate without follow-up reads.
+- **`ffgrep`** — content search, literal by default, regex when `literal=false`; `contextBefore`/`contextAfter` (max 5) disambiguate without follow-up reads; `expand:function` attributes each hit to its enclosing symbol with an `in <kind> <name>` header (approximate, line-anchored).
 - **`ffoutline`** (`outline` alias) — approximate per-file symbol overview. Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline → grep → read. Regex-based, explicitly approximate, every hit carries a line number.
-- **`ffcallers`** — approximate "who calls X". Use instead of shell grep chains: definition-vs-import-vs-call-site queries collapse into one frecency-ranked call. Text heuristics, explicitly approximate — confirm with read. Rows carry certainty labels: import/call-paren sites are exact, member mentions are `[possible]`-tagged; `exact_only` drops the possible rows.
+- **`ffcallers`** — approximate "who calls X". Use instead of shell grep chains: definition-vs-import-vs-call-site queries collapse into one frecency-ranked call. Text heuristics, explicitly approximate — confirm with read. Rows carry certainty labels: import/call-paren sites are exact, member mentions are `[possible]`-tagged; `exact_only` drops the possible rows. `depth: 1|2|3` (default 1) BFS-follows each ring's enclosing symbols for transitive callers, rows labeled `depth:N`, cycle-guarded and capped.
 - **`ffstructural`** (`structural` alias) — approximate structural search. Use instead of hand-rolled AST-ish shell grep chains: `$VAR`/`$$$` patterns, `kind:`/`symbol:`/`references:`/`inside:`/`has:` lower to one ranked regex call with exactly one of pattern/symbol/references; `rewrite` returns a `-`/`+` preview and never writes. Regex lowering, explicitly approximate — every row is `approx:` labeled.
 - **`ffmap`** (`map` alias) — fitted repo overview. Use instead of reading directory trees or shell `ls -R` to learn a repo: per-file symbol outlines ranked by frecency, git recency and import-centrality, cut to fit `maxChars` (default 8000). Fresh scan every call — never stale.
 - **`ffcapsule`** (`capsule` alias) — fused symbol dossier. Use instead of N round-trips (outline file, grep symbol, grep imports, list callers): signature + doc comment + top callers + import sites + a data-driven `Guidance:` next step in one call. All rows approximate — confirm with read.
@@ -62,6 +62,7 @@ ffgrep ("Grep content"; `grep` in override mode)
   cursor: "Opaque pagination cursor from a previous call"
   contextBefore: "Context lines before each match (default 0, max 5)"
   contextAfter: "Context lines after each match (default 0, max 5)"
+  expand: "Enclosing-symbol attribution: 'function' adds an 'in <kind> <name>' header per match via an outline pass (default 'none') — approximate, line-anchored"
   maxChars: "Max output chars; when exceeded returns per-file counts instead of rows"
   concise: "Concise path:line rows (default false) — existence probe without text; ignores context params"
 ffoutline ("Outline file"; `outline` alias, always registered)
@@ -91,6 +92,7 @@ ffcallers ("Find callers")
   cursor: "Opaque pagination cursor from a previous call"
   maxChars: "Max output chars; when exceeded returns per-file counts instead of rows"
   exact_only: "Exact-only: drop possible mentions (member access `.SYM`, comments), keep import/call-paren sites"
+  depth: "Caller depth 1|2|3 (default 1) — BFS over enclosing symbols for transitive callers; rows labeled depth:N; downstream callees out of scope"
 ffstructural ("Structural search"; `structural` alias, always registered)
   "Approximate structural code search (omp-find). Use instead of hand-rolled AST-ish shell grep chains (piped rg/sed for call shapes, def sites, usages): ast-grep-style $VAR/$$$ patterns lower to one ranked regex call with exactly one of pattern/symbol/references. Regex lowering over live text — not AST-accurate; every row is approx: labeled with a line number — verify with read. rewrite returns a preview diff only and never writes."
   approval: read
@@ -203,6 +205,7 @@ Matched 58 hits in 4 files (output exceeds 40 chars). Per-file counts: search.ts
 find status
 index: ok (rg: ripgrep 14.1.0 (rev ...); backend: rg; index: none (fresh scan, no watcher))
 frecency: ok (3 paths tracked (<store-path>/frecency.json))
+session: 2 calls (find: 1, grep: 1); backend rg: 1 walker: 1; timeouts: 0; avg 3ms
 
 > /find-rescan
 caches dropped (nothing cached)
@@ -220,21 +223,21 @@ caches dropped (nothing cached)
 
 `ffgrep` takes the same idea through parameters instead: `pattern` (required), optional `path` filter (`src/`, `*.ts`, or a bare filename like `server.py`), `literal` (default `true`), `ignoreCase`, plus `wholeWord` (no more hand-rolled `\b` regexes) and `smartCase` (no more case juggling — lowercase matches all cases, uppercase restores sensitivity).
 
+Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no other terms lists recently modified files — frecency re-ranks the set, so the files you actually touch keep floating up. Explain recipe (≈ `codedb_explain`): `ffcapsule <symbol>` fuses signature, doc comment, callers, imports, and a data-driven `Guidance:` next step in one call instead of chaining outline/grep/callers by hand.
+
 `path` is always a within-tree filter; `cwd` sets the root. To search another project, pass its absolute directory as `cwd` — never `cd`. The runaway-tree guard still refuses filesystem-root and home-directory scans, and a non-absolute `cwd` is rejected.
 
 ## Tools / Commands
 
 | Tool / command | What it does |
-|---|---|
-| `fffind` (`pattern`, `path`, `cwd`, `limit`, `cursor`, `maxChars`, `concise`) | Ranked file paths, workspace-relative; frecency-sorted within fuzzy order. 3+-word zero-result queries retry once with the first 2 terms; empty results report files scanned + backend. Over budget → per-dir counts. `concise` keeps paths-only rows without notes/tips. |
-| `ffgrep` (`pattern`, `path`, `literal`, `ignoreCase`, `wholeWord`, `smartCase`, `cwd`, `limit`, `cursor`, `contextBefore`, `contextAfter`, `maxChars`, `concise`) | `path:line:col: text` matches plus a `(N matches total)` line; path filter applies over the full result set. Empty results report the pattern + backend. Context lines (indented, max 5/side) disambiguate without follow-up reads; over budget → per-file counts. `concise` renders `path:line` probes, ignoring context. |
+| `ffgrep` (`pattern`, `path`, `literal`, `ignoreCase`, `wholeWord`, `smartCase`, `cwd`, `limit`, `cursor`, `contextBefore`, `contextAfter`, `expand`, `maxChars`, `concise`) | `path:line:col: text` matches plus a `(N matches total)` line; path filter applies over the full result set. Empty results report the pattern + backend. Context lines (indented, max 5/side) disambiguate without follow-up reads; `expand:function` interleaves approximate `in <kind> <name>` attribution headers (outline-miss rows stay bare); over budget → per-file counts. `concise` renders `path:line` probes, ignoring context/expand. |
 | `ffoutline` (`path`, `cwd`, `depth`, `limit`, `cursor`, `maxChars`, `concise`) | Approximate `path:line:col: kind name` overview — use instead of full reads/ctags shells; composes outline → grep → read. Over budget → kind counts. `concise` renders name-only rows. |
-| `ffcallers` (`symbol`, `path`, `cwd`, `ignoreCase`, `limit`, `cursor`, `maxChars`, `exact_only`) | Approximate `path:line:col: text` reference sites — use instead of shell grep chains; frecency-ranked. Import/call-paren rows are exact, member mentions carry `[possible]`; `exact_only` keeps exact rows. Over budget → per-file counts. |
+| `ffcallers` (`symbol`, `path`, `cwd`, `ignoreCase`, `limit`, `cursor`, `maxChars`, `exact_only`, `depth`) | Approximate `path:line:col: text` reference sites — use instead of shell grep chains; frecency-ranked. Import/call-paren rows are exact, member mentions carry `[possible]`; `exact_only` keeps exact rows. `depth` 2\|3 BFS-follows enclosing symbols for transitive callers (cycle-guarded, capped); rows labeled `depth:N`. Over budget → per-file counts. |
 | `ffstructural` (`pattern`, `symbol`, `references`, `language`, `path`, `ignoreCase`, `limit`, `cursor`, `contextBefore`, `contextAfter`, `maxChars`, `rewrite`) | Approximate structural search — ast-grep-style `$VAR`/`$$$` patterns lower to one ranked call; exactly one of pattern/symbol/references; `rewrite` previews only. Rows `approx:` labeled. |
 | `ffmap` (`path`, `cwd`, `maxChars`) | Fitted `path:` + symbol overview ranked by frecency/recency/centrality; omitted-files footer. No cursor — re-call with a bigger budget refines. |
 | `ffcapsule` (`symbol`, `path`, `cwd`, `ignoreCase`, `limit`, `maxChars`) | Fused dossier: def + doc + callers + imports + `Guidance:` next step. Single page, no cursor. |
-| `/find-health` | Scan backend status (rg version or walker fallback) plus frecency status, with ok/warn/error levels. |
-| `/find-rescan` | Drops the frecency store (nothing else is cached). |
+| `/find-health` | Scan backend status (rg version or walker fallback) plus frecency status, with ok/warn/error levels — plus a `session:` stats block (calls per tool, rg-vs-walker mix, timeouts, avg ms; in-memory only). |
+| `/find-rescan` | Drops the frecency store (nothing else is cached) and resets the session counters. |
 
 `fffind` / `ffgrep` / `ffoutline` / `ffcallers` / `ffstructural` / `ffmap` / `ffcapsule` are always present (`outline`, `structural`, `map`, `capsule` aliases); override mode additionally claims `find` / `grep` (same handlers, where the host allows).
 
@@ -252,6 +255,7 @@ Mode precedence, highest first:
 ```
 
 Scanning needs no config: `rg --files` / `rg --vimgrep` when `rg` is on `PATH`, otherwise the builtin walker (symlinks not followed by default). Frecency location follows the store path above; deleting it is safe.
+Tool surface: `OMP_FIND_TOOLS=core|full` (default `core` = the full surface above as it stands; `full` adds nothing today and is reserved for future tools so they don't bloat the default). Unknown values fall back to `core`.
 
 ## Install
 

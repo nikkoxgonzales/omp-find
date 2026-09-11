@@ -27,6 +27,7 @@ export interface GrepOptions {
     timeoutMs?: number;
     contextBefore?: number;
     contextAfter?: number;
+    expand?: "none" | "function";
 }
 export interface GrepMatch {
     path: string;
@@ -35,6 +36,13 @@ export interface GrepMatch {
     text: string;
     before?: string[];
     after?: string[];
+    enclosing?: {
+        kind: string;
+        name: string;
+        line: number;
+    };
+    depth?: number;
+    via?: string;
 }
 export interface GrepResult {
     matches: GrepMatch[];
@@ -65,6 +73,11 @@ export declare function clampContext(n: number | undefined): number;
 /** Slice ±N surrounding lines onto each match (rg --vimgrep drops -B/-C, so both
 backends share this file-slicing pass; each file is read once). Never throws. */
 export declare function attachContext(cwdDir: string | undefined, matches: GrepMatch[], before: number, after: number): Promise<void>;
+/** Enclosing-symbol attribution (goldmine pick 8): one `outlineFile` depth-0
+pass per file-with-hits, each match attributed to the nearest symbol at/above
+its line. Outline misses (unreadable/binary/symbol-free files) leave the match
+untagged — never throws. Only runs on request (`expand: "function"`). */
+export declare function attachEnclosing(cwdDir: string | undefined, matches: GrepMatch[]): Promise<void>;
 export declare function grepContents(pattern: string, opts?: GrepOptions): Promise<GrepResult>;
 export interface CallersOptions {
     cwd?: string;
@@ -76,11 +89,15 @@ export interface CallersOptions {
     timeoutMs?: number;
     contextBefore?: number;
     contextAfter?: number;
+    depth?: 1 | 2 | 3;
 }
 /** Approximate "who calls X": literal-aware text heuristics (call parens, import
 lines, member access), merged/deduped by path:line. Explicitly NOT LSP-accurate:
 same-named locals and comments can match; definition lines are filtered out.
-Callers confirm hits with read. */
+Callers confirm hits with read. `depth` 2|3 BFS-transitively follows each ring's
+enclosing symbols (cycle-guarded by the visited path:line set, rings labeled
+`depth:N` on every row, hard-capped by GREP_CAP); downstream callees are out of
+scope. Default 1 keeps the single-ring shape. */
 export declare function callersOf(symbol: string, opts?: CallersOptions): Promise<GrepResult>;
 /** ffmap core: ranked per-file depth-0 outlines for a fitted repo overview.
  * Fresh scan every call (no index): one walker/rg listing, one git status,

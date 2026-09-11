@@ -1529,3 +1529,110 @@ describe('ffgrep smartCase flag', () => {
     }
   });
 });
+
+describe('session stats (pick 10)', () => {
+  function statsSearch() {
+    return {
+      findScanned: async () => ({ paths: ['a.ts'], scanned: 10, backend: 'rg' }),
+      findPaths: async () => ['a.ts'],
+      grepContents: async () => ({ matches: [{ path: 'a.ts', line: 1, col: 1, text: 'x' }], total: 1, backend: 'walker' }),
+      globToRegExp: search.globToRegExp,
+      outlineFile: async () => ({ symbols: [{ line: 1, col: 1, kind: 'function', name: 'f' }], total: 1 }),
+      callersOf: async () => ({ matches: [], total: 0, backend: 'rg' }),
+      structuralGrep: async () => ({ matches: [], total: 0, backend: 'walker' }),
+      compileStructural: search.compileStructural,
+      previewRewrite: search.previewRewrite,
+      rankMap: async () => ({ files: [], total: 0, scanned: 5, backend: 'rg' }),
+      capsuleOf: async () => ({ symbol: 's', found: false, doc: [], callers: [], imports: [], filesInvolved: 0, backend: 'walker' }),
+    };
+  }
+
+  it('counters increment per tool with backend mix, timing, and timeouts', async () => {
+    findTools.resetSessionStats();
+    const pi = fakePiTwoArg();
+    findTools.registerFindTools(pi, { search: statsSearch() }, { mode: 'additive' });
+    await pi.tools.get('fffind').execute('t', { pattern: 'a' });
+    await pi.tools.get('ffgrep').execute('t', { pattern: 'x' });
+    await pi.tools.get('ffoutline').execute('t', { path: 'a.ts' });
+    const s = findTools.getSessionStats();
+    assert.equal(s.totalCalls, 3);
+    assert.equal(s.calls.find, 1);
+    assert.equal(s.calls.grep, 1);
+    assert.equal(s.calls.outline, 1);
+    assert.equal(s.rg, 1, 'find served by rg via findScanned');
+    assert.equal(s.walker, 1, 'grep served by walker; outline has no backend');
+    assert.equal(s.timeouts, 0);
+    assert.ok(s.totalMs >= 0);
+    // A timeout rejection counts and still renders failure text.
+    const boom = fakePiTwoArg();
+    findTools.registerFindTools(boom, {
+      search: {
+        findPaths: async () => [],
+        grepContents: async () => { throw new Error('grep timed out after 30s'); },
+      },
+    }, { mode: 'additive' });
+    const out = textOf(await boom.tools.get('ffgrep').execute('t', { pattern: 'x' }));
+    assert.match(out, /ffgrep failed: grep timed out/);
+    assert.equal(findTools.getSessionStats().timeouts, 1);
+    assert.match(findTools.sessionStatsText(), /session: 4 calls \(find: 1, grep: 2, outline: 1\); backend rg: 1 walker: 1; timeouts: 1; avg \d+ms/);
+    findTools.resetSessionStats();
+  });
+
+  it('health shows the session block', async () => {
+    findTools.resetSessionStats();
+    const pi = fakePiTwoArg();
+    findTools.registerFindTools(pi, { search: statsSearch() }, { mode: 'additive' });
+    await pi.tools.get('fffind').execute('t', { pattern: 'a' });
+    const cpi = fakePiTwoArg();
+    commands.registerFindCommands(cpi, { search: { status: () => 'ok' }, frecency: { status: () => 'ok' } });
+    const ctx = {};
+    const notes = notified(ctx);
+    await cpi.commands.get('find-health').handler('', ctx);
+    assert.match(notes[0].text, /^session: 1 calls \(find: 1\)/m);
+    findTools.resetSessionStats();
+  });
+
+  it('rescan resets counters', async () => {
+    findTools.resetSessionStats();
+    const pi = fakePiTwoArg();
+    findTools.registerFindTools(pi, { search: statsSearch() }, { mode: 'additive' });
+    await pi.tools.get('ffgrep').execute('t', { pattern: 'x' });
+    assert.equal(findTools.getSessionStats().totalCalls, 1);
+    const cpi = fakePiTwoArg();
+    commands.registerFindCommands(cpi, { search: { clearCache: async () => {} }, frecency: { clear: async () => {} } });
+    const ctx = {};
+    const notes = notified(ctx);
+    await cpi.commands.get('find-rescan').handler('', ctx);
+    assert.match(notes[0].text, /caches dropped/);
+    assert.equal(findTools.getSessionStats().totalCalls, 0);
+    assert.equal(findTools.sessionStatsText(), 'session: 0 calls');
+  });
+});
+
+describe('tiered tool surface (pick 11)', () => {
+  it('default registers the current surface', async () => {
+    const pi = fakePiTwoArg();
+    await withEnv({ OMP_FIND_TOOLS: undefined }, async () => findTools.registerFindTools(pi, { search }, { mode: 'additive' }));
+    for (const name of ['fffind', 'ffgrep', 'ffoutline', 'outline', 'ffcallers', 'ffstructural', 'structural', 'ffmap', 'map', 'ffcapsule', 'capsule']) {
+      assert.ok(pi.tools.has(name), `missing ${name}`);
+    }
+  });
+
+  it('gate parses core|full, unknown falls back to core', async () => {
+    assert.equal(findTools.resolveFindToolsTier('core'), 'core');
+    assert.equal(findTools.resolveFindToolsTier('full'), 'full');
+    assert.equal(findTools.resolveFindToolsTier('FULL'), 'full');
+    assert.equal(findTools.resolveFindToolsTier(' full '), 'full');
+    assert.equal(findTools.resolveFindToolsTier('mega'), 'core');
+    assert.equal(findTools.resolveFindToolsTier(''), 'core');
+    await withEnv({ OMP_FIND_TOOLS: undefined }, async () => assert.equal(findTools.resolveFindToolsTier(), 'core'));
+    await withEnv({ OMP_FIND_TOOLS: 'full' }, async () => assert.equal(findTools.resolveFindToolsTier(), 'full'));
+    await withEnv({ OMP_FIND_TOOLS: 'bogus' }, async () => assert.equal(findTools.resolveFindToolsTier(), 'core'));
+    // Full adds nothing today: identical surface either way.
+    for (const tier of ['core', 'full']) {
+      const pi = fakePiTwoArg();
+      findTools.registerFindTools(pi, { search }, { mode: 'additive', tools: tier });
+      assert.deepEqual([...pi.tools.keys()].sort(), ['capsule', 'ffcallers', 'ffcapsule', 'fffind', 'ffgrep', 'ffmap', 'ffoutline', 'ffstructural', 'map', 'outline', 'structural']);
+    }
+  });
+});

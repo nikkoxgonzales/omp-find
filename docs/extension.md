@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.6.0). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.7.0). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -45,10 +45,13 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   `search.status()` and `frecency:` line from `frecency.status()`, each with
   `ok (no status reported)` / `error (…)` fallbacks (24–52). `search.status()` today
   reports `rg --version` presence + `index: none (direct scan, no watcher)`
-  (`search.ts:251–256`).
+  (`search.ts:251–256`), plus a `session:` stats block from the tools module
+  (`sessionStatsText`: calls per tool, rg-vs-walker mix, timeouts, avg ms —
+  in-memory counters, `session: 0 calls` when cold).
 - **`/find-rescan`** (`commands.ts:86–91`): calls `search.clearCache()` (currently a
   no-op resolve, `search.ts:258`) + `frecency.clear()` (drops persisted store + memory
-  cache), reports `caches dropped: …` or `caches dropped (nothing cached)` (55–77).
+  cache), then `resetSessionStats()` (in-memory counters go to zero); reports
+  `caches dropped: …` or `caches dropped (nothing cached)` (55–77).
 
 ## Config precedence
 
@@ -56,6 +59,11 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
 (`additive`|`override`, case-insensitive) > `"mode"` in `omp-find.json` at project
 root (missing/unparseable → ignore) > built-in default **`override`**.
 (`README.md:84–95`.)
+
+Tool tier: `resolveFindToolsTier` — explicit `tools` option > `OMP_FIND_TOOLS`
+env (`core`|`full`, case-insensitive, unknown → `core`) > built-in default
+**`core`**. Core is the full surface as it stands; `full` adds nothing today
+and is reserved for future tools so the default stays lean.
 
 ## Frecency
 
@@ -157,7 +165,14 @@ counts, grep/callers/structural→per-file counts, outline→kind counts) comple
   Card: "Use instead of shell grep chains for who-calls-X … not LSP-accurate."
   Rows carry gograph certainty: import/call-paren sites exact, member mentions
   `[possible]`-tagged (`tagCallerRows`); `exact_only` keeps exact rows; zero-exact
-  sets prepend narrowing guidance instead of a merged guess.
+  sets prepend narrowing guidance instead of a merged guess. `depth?: 1|2|3`
+  (default 1) BFS-follows each ring's enclosing symbols (depth-1 outline names)
+  over the same 3-pattern matcher — cycle-guarded via the visited `path:line`
+  set, merged rings hard-capped by `GREP_CAP`, every row labeled `depth:N`
+  (`tagCallerRows` `showDepth`, on only for depth 2|3 so depth-1 output is
+  byte-identical); each row records its ring symbol (`GrepMatch.via`) so
+  certainty/`exact_only` judge transitive rows against their own ring, not the
+  root query; downstream callees explicitly out of scope.
 - **`ffstructural`** (`structural` alias) — `src/structural.ts`:
   `compileStructural(pattern, {language})` lowers the ast-grep subset
   (`$VAR` identifier/string atom, `$$$` zero-or-more, `$A…$A` backreference,
@@ -175,12 +190,19 @@ counts, grep/callers/structural→per-file counts, outline→kind counts) comple
   `search.ts` like `outlineFile`.
 - **`ffmap`** (`map` alias) — `search.rankMap(opts)` → `{files: {path, symbols, modified, inDegree}[], total, scanned, backend}`: one listing, one git status, one text read per file (import-centrality over approximate specifier extractors — centrality only, never shown) plus one `outlineFile` depth-0 pass. Tools-side score `frecency + git + log1p(inDegree)`; file cutoff binary-searched to fit `maxChars` (default 8000) with an omitted-files footer; no cursor — re-call refines. Card: "Use instead of reading directory trees or shell ls -R … never stale."
 - **`ffcapsule`** (`capsule` alias) — `search.capsuleOf(symbol, opts)` composes existing cores only: word-mention candidates (30 most-mentioned files cap) → first name-matching non-import depth-0 outline row as def → up to 5 contiguous comment lines above it as doc → bounded `callersOf` + import-line grep → `Guidance:` footer (top caller → ffoutline it; def-only → read it; nothing → ffgrep). Caller/import rows shrink to fit `maxChars`, noted when they do. Single dossier, no cursor. Card: "Use instead of N round-trips … data-driven next step."
-- **ffgrep context** — `GrepOptions.contextBefore/contextAfter` (cap 5 via
+- **`ffgrep context` + `expand`** — `GrepOptions.contextBefore/contextAfter` (cap 5 via
   `clampContext`, default 0); `GrepMatch.before/after`; `attachContext` slices
   file lines (each file read once) for BOTH backends — `rg --vimgrep` silently
   drops `-B`/`-C`, so no `-B`/`-C` is passed. Context rows render indented
-  without a column (`  path:line: text`); cursor state carries the windows;
-- **`concise` density** — opt-in param on find/grep/outline: paths-only rows, `path:line` probes (context suppressed), name-only outlines. Same ranking and paging, carried in cursor state.
+  without a column (`  path:line: text`); cursor state carries the windows.
+  `GrepOptions.expand?: "none"|"function"` (default `none`) runs the
+  `attachEnclosing` post-pass — one depth-0 `outlineFile` per file-with-hits on
+  the page only — attributing each match to the nearest symbol at/above its
+  line (`GrepMatch.enclosing`); tools-side `renderExpandedGrepRows` interleaves
+  `in <kind> <name>` headers (consecutive same-symbol collapse, outline-miss
+  rows stay bare, `concise` suppresses headers); `expand` travels in cursor
+  state like context.
+- **`concise` density** — opt-in param on find/grep/outline: paths-only rows, `path:line` probes (context and expand suppressed), name-only outlines. Same ranking and paging, carried in cursor state.
 - **Budgeted nudges** — `tools.ts` `nudge()`: one rotating cross-tool tip appended to non-trivial results (hits > 5), 3 per tool per process; trivial calls stay clean. Footer-only, never blocks or redirects.
 - **Cursor ids** — `storeCursor` prefixes per kind (`find_c`/`grep_c`/`outline_c`/
   `callers_c`/`structural_c`), 200-entry cap, unchanged eviction.
