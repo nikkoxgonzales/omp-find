@@ -83,9 +83,12 @@ describe('stress-misc: malformed frecency store', () => {
       assert.ok(Number.isFinite(coerced) && coerced > 0, `numeric strings coerce, got ${coerced}`);
 
       // recordOpen still works on a store that held malformed entries, and the
-      // persisted file comes back fully sanitized.
-      await frecency.recordOpen('fresh.ts');
-      assert.ok((await frecency.score('fresh.ts')) > 0, 'recordOpen still bumps');
+      // persisted file comes back fully sanitized. recordOpen stats the path,
+      // so the recorded file must exist on disk.
+      const fresh = join(dir, 'fresh.ts');
+      await writeFile(fresh, 'x');
+      await frecency.recordOpen(fresh);
+      assert.ok((await frecency.score(fresh)) > 0, 'recordOpen still bumps');
       const saved = JSON.parse(await readFile(file, 'utf8'));
       assert.equal(saved.entries['coerce.ts'].count, 4, 'coerced count persists as a number');
       assert.ok(!('bad.ts' in saved.entries) && !('neg.ts' in saved.entries) && !('nul.ts' in saved.entries),

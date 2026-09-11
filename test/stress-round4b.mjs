@@ -50,10 +50,22 @@ async function withStoreEnv(fn) {
 
 describe('stress-round4b: cross-process frecency merge-on-save', () => {
   it('two interleaved writers on one store keep both batches', async () => {
-    await withStoreEnv(async () => {
+    await withStoreEnv(async (dir) => {
+      // recordOpen stats the resolved path: run from a scratch cwd holding the
+      // recorded files so the relative keys land in the store.
+      const work = join(dir, 'work');
+      await mkdir(work, { recursive: true });
+      for (const f of ['seed.ts', 'a.ts', 'b.ts', 'b2.ts', 'a2.ts', 'shared.ts']) {
+        await writeFile(join(work, f), 'x');
+      }
+      const prevCwd = process.cwd();
+      // dist() resolves against process.cwd(), so capture it before chdir.
+      const frecencyUrl = dist('frecency.js');
+      process.chdir(work);
+      try {
       // A second module instance simulates a second omp process: own cache +
       // write queue, same store file (env + cwd are process-global).
-      const frecencyB = await import(`${dist('frecency.js')}?proc=B`);
+      const frecencyB = await import(`${frecencyUrl}?proc=B`);
       const file = frecency.storePath();
 
       // Seed the store and prime both instances' caches — each "process" has
@@ -84,6 +96,9 @@ describe('stress-round4b: cross-process frecency merge-on-save', () => {
       await frecencyB.recordOpen('shared.ts');
       const saved3 = JSON.parse(await readFile(file, 'utf8'));
       assert.equal(saved3.entries['shared.ts'].count, 1, 'same-key merge keeps max, not sum');
+      } finally {
+        process.chdir(prevCwd);
+      }
     });
   });
 });

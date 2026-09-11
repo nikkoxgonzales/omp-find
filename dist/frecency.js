@@ -35,6 +35,9 @@ export function storePath(root = process.cwd()) {
  *   cwd-relative, so `read src/x.ts`, `read C:/repo/src/x.ts`, and the relative
  *   paths fffind emits all hit the same key. */
 const NON_FILE = "\0";
+/** Resolve `p` to its store key plus the absolute filesystem path it names
+ * (null for non-file URIs). `abs` is what recordOpen stats — the key alone
+ * can't be statted (it's relative or already canonicalized). */
 function keyOf(p) {
     // `?q=`/`#tag` selectors first — a URI's own query/fragment goes with the URI.
     let s = p.replace(/[?#].*$/, "");
@@ -42,12 +45,12 @@ function keyOf(p) {
     const scheme = s.match(/^[A-Za-z][A-Za-z0-9+.-]*:/);
     if (scheme !== null && scheme[0].length > 2) {
         if (scheme[0].toLowerCase() !== "file:")
-            return NON_FILE;
+            return { key: NON_FILE, abs: null };
         try {
             s = fileURLToPath(s);
         }
         catch {
-            return NON_FILE;
+            return { key: NON_FILE, abs: null };
         }
     }
     s = s.replace(/\\/g, "/");
@@ -61,11 +64,11 @@ function keyOf(p) {
         s = s.slice(0, i);
     }
     if (s === "")
-        return NON_FILE;
+        return { key: NON_FILE, abs: null };
     const abs = path.resolve(s);
     const rel = path.relative(process.cwd(), abs);
     const inside = rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
-    return (inside ? rel : abs).replace(/\\/g, "/");
+    return { key: (inside ? rel : abs).replace(/\\/g, "/"), abs };
 }
 /** Read + sanitize the store file straight from disk (no cache). Never throws:
  * missing/corrupt files return a fresh store. */
@@ -111,53 +114,110 @@ async function load(file) {
  * (last-writer-wins → merge-on-save). The `clearedAt` tombstone is the one
  * exception to monotonicity: entries last-touched before the newest clear() are
  * dropped on both sides, so a stale cache can't resurrect cleared keys.
- * Mutating `store` also freshens the shared cache. Remaining limit: no lock —
- * simultaneous same-key writes keep the max, not the sum, so counts can
- * under-count across processes. */
+ * Mutating `store` also freshens the shared cache.
+ *
+ * Cross-process exclusion: a mkdir lockfile (`<file>.lock`) wraps the whole
+ * readDisk→merge→copyFile critical section. Without it a concurrent save whose
+ * readDisk predates our write but lands after clobbers our bump entirely —
+ * and a readDisk that catches copyFile mid-flight parses a truncated file as
+ * fresh(), dropping keys wholesale. mkdir is atomic on every platform; a lock
+ * dir older than LOCK_STALE_MS is presumed abandoned (crashed holder) and
+ * stolen. If the lock can't be acquired within LOCK_TIMEOUT_MS the save
+ * proceeds unlocked — never-throws beats perfect exclusion. Remaining limit:
+ * same-key bumps merge as max, not sum, so counts can under-count. */
+const LOCK_STALE_MS = 5_000;
+const LOCK_TIMEOUT_MS = 2_000;
+const LOCK_BACKOFF_MS = 10;
+/** Try to take the lock dir once. "acquired" | "held" (live holder) | "giveup"
+ * (path exists but isn't a dir, or parent missing — locking impossible). */
+async function tryLock(lockDir) {
+    try {
+        await fs.promises.mkdir(lockDir);
+        return "acquired";
+    }
+    catch (err) {
+        if (err.code !== "EEXIST")
+            return "giveup";
+    }
+    try {
+        const st = await fs.promises.stat(lockDir);
+        if (!st.isDirectory())
+            return "giveup"; // a file sits at the lock path
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+            // Stale lock: the holder crashed mid-save. Steal it; a live holder that
+            // loses this race still wrote a consistent file (copyFile is last).
+            await fs.promises.rm(lockDir, { recursive: true, force: true });
+            return "held"; // retry mkdir next pass
+        }
+    }
+    catch { /* stat raced a release — retry mkdir */ }
+    return "held";
+}
+async function acquireLock(lockDir) {
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    for (;;) {
+        const r = await tryLock(lockDir);
+        if (r === "acquired")
+            return true;
+        if (r === "giveup" || Date.now() >= deadline)
+            return false;
+        const { promise, resolve } = Promise.withResolvers();
+        setTimeout(resolve, LOCK_BACKOFF_MS);
+        await promise;
+    }
+}
 async function save(store, file, merge = false) {
-    if (merge) {
-        const disk = await readDisk(file);
-        // Tombstone wins over entries: anything last-touched before the newest
-        // clear() is dead, whether it lives in this store or on disk.
-        const tombstone = Math.max(store.clearedAt ?? 0, disk.clearedAt ?? 0);
-        if (tombstone > 0)
-            store.clearedAt = tombstone;
-        // A tombstone in the future means the clock regressed (or was patched) —
-        // timestamp ordering is meaningless then, so the drop rule stays inert
-        // rather than eating every entry written under the skewed clock.
-        const drop = tombstone > 0 && tombstone <= Date.now();
-        if (drop) {
-            for (const [k, e] of Object.entries(store.entries)) {
-                if (e.last < tombstone)
-                    delete store.entries[k];
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    const lockDir = `${file}.lock`;
+    const locked = await acquireLock(lockDir);
+    try {
+        if (merge) {
+            // Re-read under the lock: anything committed while we waited is folded in.
+            const disk = await readDisk(file);
+            // Tombstone wins over entries: anything last-touched before the newest
+            // clear() is dead, whether it lives in this store or on disk.
+            const tombstone = Math.max(store.clearedAt ?? 0, disk.clearedAt ?? 0);
+            if (tombstone > 0)
+                store.clearedAt = tombstone;
+            // A tombstone in the future means the clock regressed (or was patched) —
+            // timestamp ordering is meaningless then, so the drop rule stays inert
+            // rather than eating every entry written under the skewed clock.
+            const drop = tombstone > 0 && tombstone <= Date.now();
+            if (drop) {
+                for (const [k, e] of Object.entries(store.entries)) {
+                    if (e.last < tombstone)
+                        delete store.entries[k];
+                }
+            }
+            for (const [k, e] of Object.entries(disk.entries)) {
+                if (drop && e.last < tombstone)
+                    continue;
+                const cur = store.entries[k];
+                store.entries[k] = cur === undefined ? e : { count: Math.max(cur.count, e.count), last: Math.max(cur.last, e.last) };
             }
         }
-        for (const [k, e] of Object.entries(disk.entries)) {
-            if (drop && e.last < tombstone)
-                continue;
-            const cur = store.entries[k];
-            store.entries[k] = cur === undefined ? e : { count: Math.max(cur.count, e.count), last: Math.max(cur.last, e.last) };
+        const tmp = `${file}.tmp.${process.pid}`;
+        const fh = await fs.promises.open(tmp, "w");
+        try {
+            await fh.writeFile(JSON.stringify(store));
+            await fh.sync();
         }
-    }
-    await fs.promises.mkdir(path.dirname(file), { recursive: true });
-    const tmp = `${file}.tmp.${process.pid}`;
-    const fh = await fs.promises.open(tmp, "w");
-    try {
-        await fh.writeFile(JSON.stringify(store));
-        await fh.sync();
+        finally {
+            await fh.close();
+        }
+        await fs.promises.copyFile(tmp, file);
+        await fs.promises.rm(tmp, { force: true });
     }
     finally {
-        await fh.close();
+        if (locked)
+            await fs.promises.rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
     }
-    await fs.promises.copyFile(tmp, file);
-    await fs.promises.rm(tmp, { force: true });
 }
 /** In-process write queue: parallel recordOpen calls otherwise race load→bump→save
  * (each loads a fresh store before the other saves) and all but one bump is lost.
  * Chained so every write sees the previous write's store. Cross-process writes
- * merge per key on save (max count, max last) instead of last-writer-wins; no
- * lock, so simultaneous same-key bumps can still under-count — documented in
- * README + docs/extension.md. */
+ * serialize on a mkdir lockfile around readDisk→merge→copyFile (see save), so a
+ * contended key's bumps merge instead of clobbering each other. */
 let writeQueue = Promise.resolve();
 function enqueueWrite(work) {
     const run = writeQueue.then(work, work);
@@ -169,10 +229,15 @@ export async function recordOpen(p) {
     return enqueueWrite(async () => {
         try {
             const file = storePath();
-            const store = await load(file);
-            const key = keyOf(p);
-            if (key === NON_FILE)
+            const { key, abs } = keyOf(p);
+            if (key === NON_FILE || abs === null)
                 return; // non-file URI — don't write noise
+            // Only real files count as opens: a directory listing (`read src/`) or a
+            // path that doesn't exist must not pollute the ranking.
+            const st = await fs.promises.stat(abs).catch(() => null);
+            if (st === null || !st.isFile())
+                return;
+            const store = await load(file);
             const prev = store.entries[key];
             store.entries[key] = { count: (prev?.count ?? 0) + 1, last: Date.now() };
             await save(store, file, true);
@@ -184,7 +249,7 @@ export async function recordOpen(p) {
 export async function score(p) {
     try {
         const store = await load(storePath());
-        const key = keyOf(p);
+        const { key } = keyOf(p);
         if (key === NON_FILE)
             return 0;
         const e = store.entries[key];

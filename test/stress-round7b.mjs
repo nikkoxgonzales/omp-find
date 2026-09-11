@@ -1,6 +1,6 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -76,7 +76,18 @@ async function waitForEntry(key, timeoutMs = 5000) {
 
 describe('stress-round7b: tool_result feeds frecency', () => {
   it('read/edit/write tool_result events record opens; errors and non-file tools do not', async () => {
-    await withStoreEnv(async () => {
+    await withStoreEnv(async (dir) => {
+      // recordOpen stats the resolved path: run from a scratch cwd holding the
+      // recorded files (including the filtered ones, so filtering — not a
+      // missing file — is what keeps them out of the store).
+      const work = join(dir, 'work');
+      await mkdir(join(work, 'src'), { recursive: true });
+      for (const f of ['readme.ts', 'edited.ts', 'wrote.ts', 'failed.ts', 'bash.ts']) {
+        await writeFile(join(work, 'src', f), 'x');
+      }
+      const prevCwd = process.cwd();
+      process.chdir(work);
+      try {
       const pi = fakePi();
       extension.default(pi);
       await pi.emit('tool_result', { type: 'tool_result', toolCallId: 'c1', toolName: 'read', input: { path: 'src/readme.ts' }, content: [], isError: false });
@@ -93,6 +104,9 @@ describe('stress-round7b: tool_result feeds frecency', () => {
       }
       for (const p of ['src/failed.ts', 'src/bash.ts']) {
         assert.equal(saved.entries?.[p], undefined, `store must not gain ${p}`);
+      }
+      } finally {
+        process.chdir(prevCwd);
       }
     });
   });
@@ -214,7 +228,14 @@ describe('stress-round7b: our own tools record frecency', () => {
   });
 
   it('ffcapsule records the resolved def file', async () => {
-    await withStoreEnv(async () => {
+    await withStoreEnv(async (dir) => {
+      // recordOpen stats the resolved path: the stub's defFile must exist.
+      const work = join(dir, 'work');
+      await mkdir(join(work, 'src'), { recursive: true });
+      await writeFile(join(work, 'src', 'defs.ts'), 'x');
+      const prevCwd = process.cwd();
+      process.chdir(work);
+      try {
       const stub = {
         ...search,
         capsuleOf: async () => ({
@@ -229,6 +250,9 @@ describe('stress-round7b: our own tools record frecency', () => {
       const entry = await waitForEntry('src/defs.ts');
       assert.ok(entry, 'frecency store gained src/defs.ts after ffcapsule');
       await frecency.recordOpen('__flush__.ts');
+      } finally {
+        process.chdir(prevCwd);
+      }
     });
   });
 });

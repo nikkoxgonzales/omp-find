@@ -1,6 +1,6 @@
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -32,9 +32,16 @@ async function withEnv(vars, fn) {
 /** Run fn with the frecency store isolated to a fresh temp LOCALAPPDATA. */
 async function isolated(fn) {
   const dir = await mkdtemp(join(tmpdir(), 'omp-find-r8-'));
+  // recordOpen stats the resolved path: each test runs from a scratch cwd
+  // (dir/work) holding a proj/ dir so recorded proj/* files can exist.
+  const work = join(dir, 'work');
+  await mkdir(join(work, 'proj'), { recursive: true });
+  const prevCwd = process.cwd();
+  process.chdir(work);
   try {
     return await withEnv({ LOCALAPPDATA: dir, HOME: dir, USERPROFILE: dir }, () => fn(dir));
   } finally {
+    process.chdir(prevCwd);
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -49,6 +56,7 @@ describe('stress-round8: frecency key canonicalization', () => {
     await isolated(async () => {
       await frecency.clear();
       const abs = join(process.cwd(), 'proj', 'x.ts').replace(/\\/g, '/');
+      await writeFile(abs, 'x');
       await frecency.recordOpen(`${abs}:10-20`);
       assert.ok((await frecency.score('proj/x.ts')) > 0, 'selector stripped + relativized');
       assert.ok((await frecency.score(abs)) > 0, 'absolute score hits the same key');
@@ -75,6 +83,7 @@ describe('stress-round8: frecency key canonicalization', () => {
     await isolated(async () => {
       await frecency.clear();
       const abs = join(process.cwd(), 'proj', 'x.ts');
+      await writeFile(abs, 'x');
       await frecency.recordOpen('proj/x.ts');
       await frecency.recordOpen(abs);
       await frecency.recordOpen(abs.replace(/\\/g, '/'));
@@ -87,6 +96,8 @@ describe('stress-round8: frecency key canonicalization', () => {
   it('`?q=`, `#tag`, `:raw`, `:img`, `:conflicts`, `:N+M` spellings all hit the plain key', async () => {
     await isolated(async () => {
       await frecency.clear();
+      await writeFile('proj/y.ts', 'x');
+      await writeFile('proj/z.ts', 'x');
       await frecency.recordOpen('proj/y.ts');
       for (const p of ['proj/y.ts?q=what', 'proj/y.ts#A1B2', 'proj/y.ts:raw',
         'proj/y.ts:img', 'proj/y.ts:conflicts', 'proj/y.ts:50+150',
@@ -103,18 +114,23 @@ describe('stress-round8: frecency key canonicalization', () => {
     await isolated(async () => {
       await frecency.clear();
       const abs = join(process.cwd(), 'proj', 'f.ts');
+      await writeFile(abs, 'x');
       await frecency.recordOpen(pathToFileURL(abs).href);
       assert.ok((await frecency.score('proj/f.ts')) > 0, 'file:// unwrapped + relativized');
     });
   });
 
   it('a drive-letter colon is not a selector; outside-cwd paths stay absolute', async () => {
-    await isolated(async () => {
+    await isolated(async (dir) => {
       await frecency.clear();
-      // `C:/x.ts:10` — the `C:` prefix must survive stripping; outside cwd so the
-      // key stays absolute.
-      await frecency.recordOpen('C:/outside-r8/x.ts:10');
-      assert.ok((await frecency.score('C:/outside-r8/x.ts')) > 0, 'drive colon survived');
+      // `X:/x.ts:10` — the drive prefix must survive stripping; the file lives
+      // outside the scratch cwd so the key stays absolute.
+      const outside = join(dir, 'outside-r8', 'x.ts');
+      await mkdir(join(dir, 'outside-r8'), { recursive: true });
+      await writeFile(outside, 'x');
+      const outsideFwd = outside.replace(/\\/g, '/');
+      await frecency.recordOpen(`${outsideFwd}:10`);
+      assert.ok((await frecency.score(outsideFwd)) > 0, 'drive colon survived');
       const entries = await storedEntries();
       const keys = Object.keys(entries);
       assert.equal(keys.length, 1);

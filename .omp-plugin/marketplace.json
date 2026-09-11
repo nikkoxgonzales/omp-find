@@ -5,12 +5,12 @@
   },
   "metadata": {
     "description": "Fast file finding and content grep for omp/pi",
-    "version": "0.8.9"
+    "version": "0.8.10"
   },
   "plugins": [
     {
       "name": "omp-find",
-      "version": "0.8.9",
+      "version": "0.8.10",
       "description": "A lighter fff for omp: fffind file search and ffgrep content grep with frecency ranking.",
       "category": "development",
       "license": "MIT",

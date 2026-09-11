@@ -19,7 +19,7 @@ const TS = [
     { re: new RegExp(`^(?:export\\s+)?(?:const\\s+)?enum\\s+(${IDENT})`), kind: "enum", nameIdx: 1 },
     { re: new RegExp(`^(?:export\\s+)?type\\s+(${IDENT})`), kind: "type", nameIdx: 1 },
     { re: new RegExp(`^(?:export\\s+)?const\\s+(${IDENT})\\s*=.*=>`), kind: "const", nameIdx: 1 },
-    { re: new RegExp(`^(?:(?:public|private|protected|static|async|abstract|override|readonly)\\s+|\\*\\s*)*(?:get\\s+|set\\s+)?(${IDENT})\\s*\\([^;]*\\)\\s*(?::\\s*[^{};]+)?\\s*(?:\\{[^\\n]*)?,?\\s*$`), kind: "method", nameIdx: 1, nested: true },
+    { re: new RegExp(`^(?:(?:public|private|protected|static|async|abstract|override|readonly)\\s+|\\*\\s*)*(?:get\\s+|set\\s+)?(${IDENT})\\s*\\([^;]*\\)\\s*(?::\\s*[^{};]+)?\\s*(?:\\{[^\\n]*)?,?\\s*$`), kind: "method", nameIdx: 1, nested: true, heuristic: true },
 ];
 const PY = [
     { re: new RegExp(`^(?:async\\s+)?def\\s+(${WORD})`), kind: "def", nameIdx: 1 },
@@ -35,24 +35,35 @@ const RUST = [
 ];
 const JAVA = [
     { re: new RegExp(`^(?:(?:public|private|protected|static|final|abstract|sealed|partial|internal|synchronized)\\s+)*(class|interface|enum|record|struct)\\s+(${WORD})`), kind: "", nameIdx: 2 },
-    { re: new RegExp(`^(?:(?:public|private|protected|static|final|async|override|virtual|synchronized)\\s+)*[\\w<>.\\[\\],? ]+\\s+(${WORD})\\s*\\([^;]*\\)\\s*(?:throws\\s+[\\w,\\s.]+)?\\s*(?:\\{[^\\n]*)?,?\\s*$`), kind: "method", nameIdx: 1, nested: true },
-    { re: new RegExp(`^(?:(?:public|private|protected)\\s+)*(${WORD})\\s*\\([^;]*\\)\\s*(?:throws\\s+[\\w,\\s.]+)?\\s*(?:\\{[^\\n]*)?,?\\s*$`), kind: "ctor", nameIdx: 1, nested: true },
+    // Ctor BEFORE method: the method rule's return-type group would otherwise
+    // backtrack and consume `public` as the type, mislabeling `public Foo()`.
+    { re: new RegExp(`^(?:(?:public|private|protected)\\s+)*(${WORD})\\s*\\([^;]*\\)\\s*(?:throws\\s+[\\w,\\s.]+)?\\s*(?:\\{[^\\n]*)?,?\\s*$`), kind: "ctor", nameIdx: 1, nested: true, heuristic: true },
+    { re: new RegExp(`^(?:(?:public|private|protected|static|final|async|override|virtual|synchronized)\\s+)*[\\w<>.\\[\\],? ]+\\s+(${WORD})\\s*\\([^;]*\\)\\s*(?:throws\\s+[\\w,\\s.]+)?\\s*(?:\\{[^\\n]*)?,?\\s*$`), kind: "method", nameIdx: 1, nested: true, heuristic: true },
 ];
 /** C/C++ kept coarse: type declarations plus plausible top-level function definitions. */
 const CPP = [
     { re: new RegExp(`^(?:template\\s*<[^>]*>\\s*)?(class|struct|enum(?:\\s+class)?)\\s+(${WORD})`), kind: "", nameIdx: 2 },
-    { re: new RegExp(`^(?:[A-Za-z_][\\w:<>*&]*\\s+)?([A-Za-z_]\\w*)\\s*\\([^;{}]*\\)\\s*(?:const\\s*)?(?:noexcept\\s*)?(?:override\\s*)?\\{?\\s*$`), kind: "function", nameIdx: 1 },
+    { re: new RegExp(`^(?:[A-Za-z_][\\w:<>*&]*\\s+)?([A-Za-z_]\\w*)\\s*\\([^;{}]*\\)\\s*(?:const\\s*)?(?:noexcept\\s*)?(?:override\\s*)?\\{?\\s*$`), kind: "function", nameIdx: 1, heuristic: true },
 ];
-/** Unknown extensions: only the unambiguous cross-language keywords. */
+/** Unknown extensions: only the unambiguous cross-language keywords, behind the
+ * common modifier prefixes (Kotlin `sealed class`/`data class`, C# `internal`,
+ * etc.). `fun` is deliberately NOT a keyword here — GENERIC stays
+ * declaration-keyword-only; .kt still lists classes. */
 const GENERIC = [
-    { re: new RegExp(`^(?:async\\s+)?(class|function|def|fn|func|interface|enum|struct|type)\\s+(${WORD})`), kind: "", nameIdx: 2 },
+    { re: new RegExp(`^(?:(?:public|private|protected|internal|sealed|open|data|abstract|final|static|export|async)\\s+)*(class|function|def|fn|func|interface|enum|struct|type)\\s+(${WORD})`), kind: "", nameIdx: 2 },
 ];
-/** Method-name blocklist: control-flow/calls that mimic a signature. Own-
- * property test only — `constructor`, `toString` & friends are real method
- * names that must not be dropped via Object.prototype leakage. */
+/** Method-name blocklist: control-flow/calls that mimic a signature. Applied
+ * only to `heuristic` rules (name captured by shape, not anchored on a
+ * keyword) — keyword-anchored rules legitimately declare names like Rust's
+ * `pub fn new`. Own-property test only — `constructor`, `toString` & friends
+ * are real method names that must not be dropped via Object.prototype leakage. */
 const NOT_A_METHOD = { if: true, for: true, while: true, switch: true, catch: true, return: true, new: true, super: true, this: true, typeof: true, sizeof: true, assert: true, print: true, println: true };
-/** Comment-only line openers (checked on the trimmed line). */
+/** Comment-only line openers (checked on the trimmed line). A leading `*` is a
+ * JSDoc continuation EXCEPT when it opens a sync generator method (`*gen()`,
+ * `* gen()`) — star + identifier + paren is a signature, not prose. */
 function isComment(line) {
+    if (/^\*\s*[A-Za-z_$][\w$]*\s*\(/.test(line))
+        return false;
     return line.startsWith("//") || line.startsWith("#") || line.startsWith("/*")
         || line.startsWith("*") || line.startsWith("<!--") || line.startsWith("--");
 }
@@ -135,7 +146,7 @@ export async function outlineFile(file, opts = {}) {
             if (!m)
                 continue;
             const name = m[rule.nameIdx];
-            if (!name || Object.hasOwn(NOT_A_METHOD, name))
+            if (!name || (rule.heuristic === true && Object.hasOwn(NOT_A_METHOD, name)))
                 break;
             const kind = rule.kind || m[1];
             const col = line.indexOf(name) + 1;

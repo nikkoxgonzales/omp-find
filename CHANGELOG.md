@@ -2,6 +2,15 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.10]
+
+### Fixed
+
+- Frecency now uses a mkdir-based lockfile around read/merge/write to prevent cross-process save clobbering; it also skips directory and phantom paths so only real files get tracked.
+- `ffoutline` lists sync generator methods (`*gen()`), Rust `pub fn new`, and Java constructors labeled `ctor`; the GENERIC rule now recognizes Kotlin `sealed`/`data`/`internal` classes.
+- `ffstructural` rejects patterns that match the empty string (`$$$`, `$$$A`) with a clean error instead of flooding per-column matches.
+- Numeric params (`limit`, `depth`, `context*`, `maxChars`) must be integers; non-integers like `limit:2.5` throw a clean error.
+- 0.8.8 CHANGELOG bullet corrected: non-string param rejection only fires on direct-execute/test callers — the host layer coerces scalar/object args to the declared schema type before the tool sees them.
 ## [0.8.9]
 
 ### Fixed
@@ -18,7 +27,7 @@ Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lock
 - `ffstructural kind:class` matches `public`/`private`/`final`/`sealed`/`export default` classes; `kind:call` no longer returns the definition line.
 - `ffcapsule` def-hunt prefers source files over docs/dist — `capsule parseFindQuery` resolves src/search.ts, not a README example.
 - `ffcallers` `ignoreCase` no longer leaks the definition line; keyword-less defs (object-literal methods, `constructor(`) are filtered from caller rows.
-- `ffcallers` `depth` validates to 1|2|3 (was silently clamped); `limit` must be >= 1; non-string pattern/symbol/path params rejected with `expected string`.
+- `ffcallers` `depth` validates to 1|2|3 (was silently clamped); `limit` must be >= 1; non-string pattern/symbol/path params rejected with `expected string` — direct `execute()` callers only: on the live path the host JSON-parses string args and coerces scalars/objects to the declared schema type before the tool sees them, so non-string params arrive as strings.
 - `scan root is not a directory` distinguishes file-as-cwd from a missing root.
 
 ## [0.8.7]

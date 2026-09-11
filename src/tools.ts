@@ -197,10 +197,13 @@ function strParam(params: Record<string, unknown>, key: string): string | undefi
   return typeof v === "string" && v.length > 0 ? v : undefined;
 }
 
-/** Strict variant for the primary params (pattern/symbol/path/references): a
- * defined non-string value is a caller bug — surface it instead of silently
- * treating the param as absent (a number used to fall through to the missing-
- * param error, or worse, satisfy a resume drift check as "unset"). */
+/** Strict variant for the primary params (pattern/symbol/path/references).
+ * Defense-in-depth only: on the live path the host JSON-parses string args and
+ * coerces scalars/objects to the declared schema type BEFORE execute() runs, so
+ * a non-string can only arrive from a direct execute() caller (tests, embedders
+ * bypassing the host). Surface it instead of silently treating the param as
+ * absent (a number used to fall through to the missing-param error, or worse,
+ * satisfy a resume drift check as "unset"). */
 function strictStrParam(params: Record<string, unknown>, key: string): string | undefined {
   const v = params[key];
   if (v === undefined) return undefined;
@@ -211,8 +214,9 @@ function strictStrParam(params: Record<string, unknown>, key: string): string | 
 function numParam(params: Record<string, unknown>, key: string): number | undefined {
   const v = params[key];
   if (v === undefined) return undefined;
-  if (typeof v !== "number" || !Number.isFinite(v) || v < 1) throw new Error(`${key} must be >= 1`);
-  return Math.min(Math.floor(v), PAGE_MAX);
+  if (typeof v !== "number" || !Number.isFinite(v) || !Number.isInteger(v)) throw new Error(`${key} must be an integer >= 1`);
+  if (v < 1) throw new Error(`${key} must be >= 1`);
+  return Math.min(v, PAGE_MAX);
 }
 
 /** Best-effort frecency bump for our own file-targeted calls (ffoutline's file,
@@ -390,12 +394,14 @@ function scopePin(filter: string | undefined): string | undefined {
 function ctxParam(params: Record<string, unknown>, key: string): number {
   const v = params[key];
   if (typeof v !== "number" || !Number.isFinite(v)) return 0;
-  return Math.max(0, Math.min(5, Math.floor(v)));
+  if (!Number.isInteger(v)) throw new Error(`${key} must be an integer`);
+  return Math.max(0, Math.min(5, v));
 }
 function charsParam(params: Record<string, unknown>, key: string): number | undefined {
   const v = params[key];
   if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return undefined;
-  return Math.min(Math.floor(v), 1000000);
+  if (!Number.isInteger(v)) throw new Error(`${key} must be an integer >= 1`);
+  return Math.min(v, 1000000);
 }
 /** Top-counts summary fragment: "b: 3, a: 1", at most 10 entries. */
 function countSummary(entries: Array<readonly [string, number]>): string {
@@ -815,6 +821,12 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         let bound: Snapshot | undefined;
         let resumeNote: string | undefined;
         const cursorId = strParam(params, "cursor");
+        // depth is a 0|1 knob — a non-integer used to floor silently; reject it
+        // on both fresh calls and resumes (mirrors ffcallers' closed-set check).
+        const depthParam = params["depth"];
+        if (depthParam !== undefined && (typeof depthParam !== "number" || !Number.isInteger(depthParam))) {
+          return text(`${toolName} failed: depth must be an integer`);
+        }
         if (cursorId) {
           const st = cursors.get(cursorId);
           if (!st || st.kind !== "outline") return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
@@ -827,15 +839,13 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           if (inLimit !== undefined && inLimit !== st.limit) diff.push("limit");
           const inCwd = cwdParam(params);
           if (inCwd !== undefined && inCwd !== st.cwd) diff.push("cwd");
-          const inDepth = params["depth"];
-          if (inDepth !== undefined && (inDepth === 1 ? 1 : 0) !== st.depth) diff.push("depth");
+          if (depthParam !== undefined && (depthParam === 1 ? 1 : 0) !== st.depth) diff.push("depth");
           resumeNote = cursorParamNote(diff);
         } else {
           const f = strictStrParam(params, "path");
           if (!f) return text(`${toolName} failed: provide a path`);
           file = f; dispForError = toDisplay(f);
-          const d = params["depth"];
-          depth = d === 1 ? 1 : 0;
+          depth = depthParam === 1 ? 1 : 0;
           limit = numParam(params, "limit") ?? FIND_PAGE;
           offset = 0;
           cwd = cwdParam(params);

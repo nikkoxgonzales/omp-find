@@ -571,9 +571,16 @@ describe('search status / warm / clear', () => {
 describe('frecency store (isolated LOCALAPPDATA)', () => {
   async function isolated(fn) {
     const dir = await mkdtemp(join(tmpdir(), 'omp-find-freq-'));
+    // recordOpen stats the resolved path, so recorded proj/* files must exist:
+    // each test runs from a scratch cwd (dir/work) holding a proj/ dir.
+    const work = join(dir, 'work');
+    await mkdir(join(work, 'proj'), { recursive: true });
+    const prevCwd = process.cwd();
+    process.chdir(work);
     try {
       return await withEnv({ LOCALAPPDATA: dir, HOME: dir, USERPROFILE: dir }, () => fn(dir));
     } finally {
+      process.chdir(prevCwd);
       await rm(dir, { recursive: true, force: true });
     }
   }
@@ -581,6 +588,8 @@ describe('frecency store (isolated LOCALAPPDATA)', () => {
   it('recorded paths outscore unknown ones; counts accumulate', async () => {
     await isolated(async () => {
       await frecency.clear();
+      await writeFile('proj/a.ts', 'x');
+      await writeFile('proj/b.ts', 'x');
       assert.equal(await frecency.score('proj/new-a.ts'), 0);
       await frecency.recordOpen('proj/a.ts');
       await frecency.recordOpen('proj/a.ts');
@@ -594,6 +603,7 @@ describe('frecency store (isolated LOCALAPPDATA)', () => {
   it('backslash and slash keys are the same entry', async () => {
     await isolated(async () => {
       await frecency.clear();
+      await writeFile('proj/win.ts', 'x');
       await frecency.recordOpen('proj\\win.ts');
       assert.ok((await frecency.score('proj/win.ts')) > 0, 'normalized key scores');
     });
@@ -605,6 +615,7 @@ describe('frecency store (isolated LOCALAPPDATA)', () => {
       const realNow = Date.now;
       try {
         Date.now = () => 1_000_000;
+        await writeFile('proj/old.ts', 'x');
         await frecency.recordOpen('proj/old.ts');
         const fresh = await frecency.score('proj/old.ts');
         Date.now = () => 1_000_000 + 7 * 24 * 3600 * 1000; // one half-life later
@@ -638,6 +649,7 @@ describe('frecency store (isolated LOCALAPPDATA)', () => {
   it('status reports empty, tracked, and corrupt states', async () => {
     await isolated(async (dir) => {
       assert.match(frecency.status(), /empty/, 'no file yet reads empty');
+      await writeFile('proj/a.ts', 'x');
       await frecency.recordOpen('proj/a.ts');
       assert.match(frecency.status(), /1 paths tracked/);
       assert.ok(frecency.status().includes(dir), `status names the store dir: ${frecency.status()}`);
@@ -651,6 +663,7 @@ describe('frecency store (isolated LOCALAPPDATA)', () => {
 
   it('clear drops the score to zero', async () => {
     await isolated(async () => {
+      await writeFile('proj/a.ts', 'x');
       await frecency.recordOpen('proj/a.ts');
       assert.ok((await frecency.score('proj/a.ts')) > 0);
       await frecency.clear();
@@ -811,14 +824,14 @@ describe('registerFindTools edges', () => {
     assert.deepEqual(calls.find[0].opts, { cwd: undefined, limit: 50, offset: 0 });
   });
 
-  it('fffind limit validation: clamp, floor, and defaults', async () => {
+  it('fffind limit validation: clamp, integer rejection, and defaults', async () => {
     const pi = fakePiTwoArg();
     findTools.registerFindTools(pi, { search: stubSearch(stubHits(60)) }, { mode: 'additive' });
     const find = pi.tools.get('fffind');
     const clamped = textOf(await find.execute('t', { pattern: 'f', limit: 1000 }));
     assert.match(clamped, /\(10 more; pass cursor/);
     const floored = textOf(await find.execute('t', { pattern: 'f', limit: 2.7 }));
-    assert.match(floored, /\(58 more; pass cursor/);
+    assert.match(floored, /limit must be an integer >= 1/, `non-integer limit rejected:\n${floored}`);
     for (const bad of [-5, 0, NaN, 'x', true]) {
       const out = textOf(await find.execute('t', { pattern: 'f', limit: bad }));
       assert.ok(!/more; pass cursor/.test(out) || out.includes('(30 more'), `default page for limit=${String(bad)}:\n${out}`);

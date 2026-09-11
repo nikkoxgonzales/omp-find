@@ -38,7 +38,8 @@ export interface CompiledStructural {
 (the atom is shared, so nothing throws on a new language). */
 export declare function normalizeLanguage(lang: string | undefined): string;
 /** Compile one structural pattern to a regex lowering. Throws on empty input,
-unknown kind:, malformed two-phase separators, or >9 distinct metavariables. */
+unknown kind:, malformed two-phase separators, >9 distinct metavariables, or a
+lowering that matches the empty string (`$$$` alone floods every line). */
 export declare function compileStructural(pattern: string, opts?: {
     language?: string;
 }): CompiledStructural;

@@ -135,7 +135,7 @@ ffcapsule ("Symbol dossier"; `capsule` alias, always registered)
   ignoreCase: "Case-insensitive match"
   limit: "Max callers/imports shown each (default 10, max 50)"
   maxChars: "Max output chars; caller/import rows shrink to fit, noted when they do"
-Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." / "ffmap failed: ..." / "ffcapsule failed: ..." (no/excess pattern/symbol/references, unknown/expired cursor, non-absolute cwd, `depth` outside 1|2|3, `limit` < 1, non-string primary params).
+Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." / "ffmap failed: ..." / "ffcapsule failed: ..." (no/excess pattern/symbol/references, unknown/expired cursor, non-absolute cwd, `depth` outside 1|2|3, non-integer `limit`/`depth`/`contextBefore`/`contextAfter`/`maxChars`, `limit` < 1, non-string primary params on direct `execute()`).
 Stale cursors (tree changed since page 1) return restart guidance as text: "...: results changed since page 1; re-run without cursor".
 Each execute also returns `details: { totalMatched, totalFiles, truncated }` (pi-fff packaging: totals over the full result set, `truncated` when a next page or count-fallback applies); hosts that ignore it see identical text. Paged results add a `"<limit> matches limit reached (max 50) — more via cursor"` notice next to the cursor footer.
 ```
@@ -243,7 +243,7 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 
 ## Honest limits
 
-- Unpinned hidden-file listing differs by backend (rg follows ignore rules; the walker skips dot-dirs outright) — pin an explicit `path` for identical results.
+- Unpinned hidden-file listing differs by backend (rg follows ignore rules AND skips dotfiles — no `--hidden` is passed; the walker skips dot-dirs outright but lists dotfiles in visible dirs) — pin an explicit `path` for identical results.
 - `node_modules` pruning is walker-only; rg follows your ignore files instead.
 - Cursors bind to result total + backend, so a compensating add+delete swap or rename/content-preserving mutation between pages reads as unchanged and resumes silently.
 - Cursor resume is a stateless re-fetch: resuming the same cursor twice returns the same rows and mints a fresh cursor id each time.
@@ -262,7 +262,7 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 - The walker skips `.git` pointer files (worktree/submodule `.git` files) as well as `.git` directories.
 - `git:modified` needs a work tree: bare repositories fail `git status` like non-repos, and the error names the requirement.
 - Capped grep-family result sets (`N+`, `capped`) mint no next-page cursor — pages beyond the cap don't exist; narrow the query for full results.
-- The cursor store is FIFO-200 with no TTL — "expired" means evicted, not aged out.
+- The cursor store is one process-global FIFO-200 map shared across all tools (a find cursor can evict a grep cursor) with no TTL — "expired" means evicted, not aged out.
 - The walker stops at `MAX_DEPTH=25` while rg is unbounded; a pinned `path` still reaches deeper dirs on the walker (the pin roots traversal at depth 0).
 - An `fffind` `path` that resolves to a file is consumed by the pin — the pin text isn't also fuzzy-matched (pin + empty pattern lists the file; pin + pattern matches within the filename).
 - A `path` that escapes the scan root (`../x`, absolute paths) errors instead of silently scanning the full tree.
@@ -278,15 +278,18 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 - `ffoutline` covers `export async function` declarations alongside plain `function`.
 - `ffstructural` `inside:`/`has:` take one `OUTER >> INNER` / `OUTER << INNER` pair — chained combinators (`inside: a >> b >> c`) are rejected, not nested.
 - `concise` exists only on `fffind`/`ffgrep`/`ffoutline`; other tools ignore it.
-- `limit` must be ≥ 1 — `limit: 0` errors (`limit must be >= 1`) instead of silently paging at the default.
+- `limit` must be an integer ≥ 1 — `limit: 0` errors (`limit must be >= 1`), `limit: 2.5` errors (`limit must be an integer >= 1`); same integer rule on `depth` (`depth must be an integer` on ffoutline; ffcallers' closed-set message), `contextBefore`/`contextAfter` (`must be an integer`), and `maxChars` (`must be an integer >= 1`) — no silent flooring.
 - `ffcallers` `depth` accepts only 1|2|3 — other values error (`depth must be 1, 2, or 3`) instead of clamping to 1.
-- Primary params (`pattern`/`symbol`/`path`/`references`) must be strings when given — a non-string errors (`<param>: expected string`) instead of coercing or passing silently.
+- Primary params (`pattern`/`symbol`/`path`/`references`) must be strings when given — a non-string errors (`<param>: expected string`) instead of coercing or passing silently. Defense-in-depth only: on the live path the host JSON-parses string args and coerces scalars/objects to the declared schema type before `execute()` runs (`pattern: 123` arrives as `'123'`, `pattern: {a:1}` as `'{"a":1}'`), so this check can only fire for direct `execute()` callers (tests, embedders bypassing the host). Note `pattern: "null"` JSON-parses to `null` at the host layer, which surfaces as `provide a pattern`.
 - Primary params are optional in the schema when `cursor` is present — `{cursor}` alone resumes on the stored page-1 params.
 - `ffstructural` `language` is a lowering hint only — it does not restrict which file types are searched.
 - On Windows the tree walk skips DOS device names (`nul`, `con`, `aux`, `prn`, `com1`–`com9`, `lpt1`–`lpt9`) — they can't be opened as files.
 - A `.git` pointer FILE (linked worktree/submodule) doesn't activate gitignore honoring — rg treats the tree as a plain directory; the walker skips the pointer file itself.
 - Binary files are skipped silently by grep (NUL-byte check) — no "skipped binary" note.
-- The `MAX_DEPTH=25` cutoff is silent — deeper files simply don't appear.
+- The `MAX_DEPTH=25` cutoff is silent and walker-only — deeper files simply don't appear; rg is unbounded.
+- `ffstructural kind:class` means "type declaration" — it matches `interface`/`struct`/`enum`/`trait` lines too, not just `class`.
+- `contextBefore`/`contextAfter` clamp to 0–5, `expand` treats anything but `function` as `none`, `ffoutline` `depth` treats any integer but 1 as 0, `maxChars` clamps at 1M — all silently (non-integer numbers error instead, per above).
+- A `read` on a directory used to record a frecency entry for a path that can never match a file — fixed in 0.8.10 (directory reads no longer feed frecency).
 
 ## Config
 

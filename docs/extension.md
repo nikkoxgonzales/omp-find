@@ -1,14 +1,14 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.9). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.10). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
 | File | Owns |
 |---|---|
 | `src/search.ts` (337 lines) | `parseFindQuery`, `globToRegExp`, `findPaths`, `grepContents`, `warmScan`, `status`, `clearCache`; consts `PAGE_DEFAULT=30`, `PAGE_MAX=50` (line 5), `RG_BUFFER=64MB`, `GREP_CAP=20000`, `MAX_DEPTH=25` (line 6), `MAX_GREP_BYTES=2MB` / `MAX_GREP_SIZE="2M"` (8), `GREP_TIMEOUT_DEFAULT=30000` (10) |
-| `src/tools.ts` (~1300 lines) | `resolveFindMode`, `registerFindTools`, cursor store (`cursors`, `storeCursor`, 200-entry cap), `applyPathFilter`, `strictStrParam`/`numParam` param validation, `safeRecordOpen` |
+| `src/tools.ts` (~1300 lines) | `resolveFindMode`, `registerFindTools`, cursor store (`cursors`, `storeCursor`, 200-entry cap), `applyPathFilter`, `strictStrParam`/`numParam`/`ctxParam`/`charsParam` param validation (integer rejection on all numeric params), `safeRecordOpen` |
 | `src/frecency.ts` (~210 lines) | `storePath`, `keyOf`, `recordOpen`, `score`, `status`, `clear`; `HALF_LIFE_MS` 7 days (line 8) |
 | `src/extension.ts` (~62 lines) | Default-export factory; static imports (fail loudly at load); `session_start` warm scan; `tool_result` frecency feed (read/edit/write opens) |
 | `src/commands.ts` (~92 lines) | `/find-health`, `/find-rescan` via deps bag |
@@ -44,6 +44,18 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   result set, `truncated` when a next page or count-fallback applies). Each def
   carries a one-line `promptSnippet` (guidelines unchanged); paged results add a
   `"<limit> matches limit reached (max 50) — more via cursor"` notice next to the cursor footer.
+- **Host arg coercion** — before `execute()` runs, the host JSON-parses string
+  args and coerces scalars/objects to the declared schema type: `pattern: 123`
+  arrives as `'123'`, `pattern: {a:1}` as `'{"a":1}'`, and `pattern: "null"`
+  JSON-parses to `null` (surfaces as `provide a pattern`). So `strictStrParam`'s
+  `<param>: expected string` can only fire for direct `execute()` callers
+  (tests, embedders bypassing the host) — it is defense-in-depth, not live-path
+  validation. Numeric params (`limit`/`depth`/`contextBefore`/`contextAfter`/
+  `maxChars`) must be integers — `2.5` errors (`<param> must be an integer [>= 1]`)
+  instead of flooring; `ffcallers` `depth` keeps its closed-set message
+  (`depth must be 1, 2, or 3`). Silent clamps that remain: `contextBefore`/
+  `contextAfter` to 0–5, `expand` non-`function` → `none`, `ffoutline` `depth`
+  integer ≠ 1 → 0, `maxChars` at 1M.
 - **Override vs additive** (`tools.ts:94–95, 208–213`): `fffind`/`ffgrep` always
   registered; `override` (default) additionally claims `find`/`grep` with the same
   handlers. Dual-arity `register` shim (99–103): single-object if host takes 1 arg,
@@ -83,10 +95,11 @@ Keys canonicalized in `keyOf` (45–69): selectors stripped (`:N`, `:N-M`, `:raw
 `?q=`, `#tag`), non-file URIs (`xd://`, `artifact://`, `https://`, …) skipped,
 `file://` unwrapped, separators `/`, cwd-relative when inside the project.
 `recordOpen` bumps count + recency — fed by the extension's `tool_result` hook
-(successful `read`/`edit`/`write`
-results with a string `input.path`) and by the tools layer itself (`ffoutline`
-records its file, `ffcapsule` records the resolved def file — both
-fire-and-forget via `safeRecordOpen`).
+(successful `read`/`edit`/`write` results with a string `input.path`; until
+0.8.10 a `read` on a directory also recorded an entry for a path that can
+never match a file — directory reads no longer feed frecency) and by the tools
+layer itself (`ffoutline` records its file, `ffcapsule` records the resolved
+def file — both fire-and-forget via `safeRecordOpen`).
 Persist is atomic (sidecar write + fsync, then copyFile over live — never
 rename-over-live on Windows, 45–58). `clear()` drops store + memory cache. Never
 throws (`recordOpen`/`score`/`clear` all swallow). Writes serialize through an
@@ -100,10 +113,12 @@ written before the tombstone existed (no `clearedAt`) load unchanged.
 
 ## Pagination
 
-Default 30, max 50, enforced in two places: `numParam` clamps tool params
-(`tools.ts:59–62`) and `pageOf` clamps core limit/offset (`search.ts:60–65`).
+Default 30, max 50, enforced in two places: `numParam` validates tool params
+(`tools.ts:59–62`, integer + `>= 1` rejection included) and `pageOf` clamps core
+limit/offset (`search.ts:60–65`).
 `fffind`/`ffgrep` return opaque cursors (`find_cN`/`grep_cN`, `storeCursor` 22–30,
-200-entry cap with oldest eviction) capturing full query state (query/limit/offset/cwd;
+one process-global FIFO-200 map shared across all tools — a find cursor can
+evict a grep cursor — with oldest eviction) capturing full query state (query/limit/offset/cwd;
 pattern/literal/ignoreCase/pathFilter/…). Footer when more remain:
 `... (N more; pass cursor "…" for the next page)` (`tools.ts:139–142, 196–201`).
 Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap or a rename/content-preserving mutation between pages is invisible to resume. Resume is a stateless re-fetch — resuming the same cursor twice returns the same rows and mints a fresh cursor id each time. Grep pages are path/line/col ordered on both backends. The primary param (`pattern`/`path`/`symbol`, or ffstructural's one-of) is optional in the schema when `cursor` is present, so `{cursor}` alone passes host validation and resumes on stored params; without a cursor the missing-param error still fires. `limit` must be ≥ 1 (`limit: 0` errors `limit must be >= 1`), `ffcallers` `depth` must be 1|2|3 (anything else errors `depth must be 1, 2, or 3` — no silent clamp), and primary params must be strings when given (`<param>: expected string`).
@@ -114,7 +129,8 @@ module graph — the cursor store, session stats, and frecency cache are
 process-global, so a `/find-rescan` in one load clears both.
 Capped grep-family results (`capped: true`, `N+` totals) mint no cursor — pages
 beyond `GREP_CAP` don't exist; the footer instead says `capped result set —
-narrow the query for full results`. The store is FIFO-200 with no TTL:
+narrow the query for full results`. The store is one process-global FIFO-200
+map across all tools with no TTL:
 "expired" means evicted, not aged out.
 
 ## Scan backends
@@ -122,8 +138,9 @@ narrow the query for full results`. The store is FIFO-200 with no TTL:
 - **Listing** (`listFiles`, `search.ts:92–100`): `rg --files --no-messages
   [--follow|--no-follow]`; on `ENOENT` (rg missing) falls back to `walkFiles`, any
   other error rethrows. `scan:"mock"` forces the walker (test hook). Unpinned
-  hidden-file listing differs by backend (rg follows ignore rules, the walker
-  skips dot-dirs outright), and `node_modules` pruning is walker-only — pin an
+  hidden-file listing differs by backend (rg follows ignore rules AND skips
+  dotfiles — no `--hidden` is passed; the walker skips dot-dirs outright but
+  lists dotfiles in visible dirs), and `node_modules` pruning is walker-only — pin an
   explicit `path` for identical results.
 - **Walker** (`walkFiles`, 72–91): iterative-depth, `MAX_DEPTH=25`, readdir errors
   swallowed per-dir, symlinks skipped unless `followSymlinks` (followed targets
@@ -236,7 +253,9 @@ counts, grep/callers/structural→per-file counts, outline→kind counts) comple
 - **`ffstructural`** (`structural` alias) — `src/structural.ts`:
   `compileStructural(pattern, {language})` lowers the ast-grep subset
   (`$VAR` identifier/string atom, `$$$` zero-or-more, `$A…$A` backreference,
-  `kind:` line shapes, `symbol:` def lines, `references:` delegation,
+  `kind:` line shapes — `kind:class` means "type declaration" and matches
+  `interface`/`struct`/`enum`/`trait` lines too, not just `class` —
+  `symbol:` def lines, `references:` delegation,
   `inside: A >> B` / `has: A << B` file-scoped two-phase — one pair only;
   chained combinators like `inside: a >> b >> c` are rejected) to single-line
   regexes; `structuralGrep` runs them via `grepContents` (`literal: false`)

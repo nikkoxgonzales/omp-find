@@ -146,18 +146,29 @@ describe('stress-round5b: scope escape errors', () => {
 
 describe('stress-round5b: frecency __proto__ key', () => {
   it('a path literally named __proto__ persists across save + reload', async () => {
-    await withStoreEnv(async () => {
+    await withStoreEnv(async (dir) => {
       // Fresh module instance = a second process: own cache + write queue.
       const frecencyB = await import(`${dist('frecency.js')}?proc=proto`);
-      await frecency.recordOpen('__proto__');
-      const file = frecency.storePath();
-      const saved = JSON.parse(await readFile(file, 'utf8'));
-      assert.ok(Object.hasOwn(saved.entries, '__proto__'), `__proto__ persisted: ${JSON.stringify(saved)}`);
-      assert.equal(saved.entries['__proto__'].count, 1);
-      // B's cache is cold, so score() re-reads disk — the proto key must survive
-      // the sanitize pass too (plain-object entries would drop it on write).
-      assert.ok((await frecencyB.score('__proto__')) > 0, 'reloaded __proto__ scores > 0');
-      assert.equal(await frecencyB.score('constructor'), 0, 'other magic names stay clean');
+      // recordOpen stats the resolved path: run from a scratch cwd holding a
+      // file literally named __proto__.
+      const work = join(dir, 'work');
+      await mkdir(work, { recursive: true });
+      await writeFile(join(work, '__proto__'), 'x');
+      const prevCwd = process.cwd();
+      process.chdir(work);
+      try {
+        await frecency.recordOpen('__proto__');
+        const file = frecency.storePath();
+        const saved = JSON.parse(await readFile(file, 'utf8'));
+        assert.ok(Object.hasOwn(saved.entries, '__proto__'), `__proto__ persisted: ${JSON.stringify(saved)}`);
+        assert.equal(saved.entries['__proto__'].count, 1);
+        // B's cache is cold, so score() re-reads disk — the proto key must survive
+        // the sanitize pass too (plain-object entries would drop it on write).
+        assert.ok((await frecencyB.score('__proto__')) > 0, 'reloaded __proto__ scores > 0');
+        assert.equal(await frecencyB.score('constructor'), 0, 'other magic names stay clean');
+      } finally {
+        process.chdir(prevCwd);
+      }
     });
   });
 });

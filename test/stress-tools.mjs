@@ -110,12 +110,25 @@ describe('stress-tools: over-budget counts are full-set', () => {
 
 describe('stress-tools: frecency parallel writes', () => {
   it('10 parallel recordOpen calls keep all 10 bumps', async () => {
-    await withStoreEnv(async () => {
-      await frecency.clear();
+    await withStoreEnv(async (dir) => {
+      // recordOpen stats the resolved path: run from a scratch cwd holding the
+      // recorded files so the relative keys land in the store.
+      const work = join(dir, 'work');
       const keys = Array.from({ length: 10 }, (_, i) => `stress/key-${i}.ts`);
+      for (const k of keys) {
+        await mkdir(join(work, dirname(k)), { recursive: true });
+        await writeFile(join(work, k), 'x');
+      }
+      const prevCwd = process.cwd();
+      process.chdir(work);
+      try {
+      await frecency.clear();
       await Promise.all(keys.map((k) => frecency.recordOpen(k)));
       for (const k of keys) {
         assert.ok((await frecency.score(k)) > 0, `${k} kept its bump`);
+      }
+      } finally {
+        process.chdir(prevCwd);
       }
     });
   });

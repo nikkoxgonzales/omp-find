@@ -40,7 +40,17 @@ async function withStoreEnv(fn) {
 
 describe('stress-round6b: frecency clearedAt tombstone', () => {
   it('clear() then a stale instance recordOpen does not resurrect cleared keys', async () => {
-    await withStoreEnv(async () => {
+    await withStoreEnv(async (dir) => {
+      // recordOpen stats the resolved path: run from a scratch cwd holding the
+      // recorded file so its relative key lands in the store.
+      const work = join(dir, 'work');
+      await mkdir(work, { recursive: true });
+      await writeFile(join(work, 'x.ts'), 'x');
+      const prevCwd = process.cwd();
+      // dist() resolves against process.cwd(), so capture it before chdir.
+      const frecencyUrl = dist('frecency.js');
+      process.chdir(work);
+      try {
       const file = frecency.storePath();
       await mkdir(dirname(file), { recursive: true });
       // Seed the store with an entry old enough to predate the tombstone.
@@ -48,7 +58,7 @@ describe('stress-round6b: frecency clearedAt tombstone', () => {
       // Instance A loads the seeded store into its cache.
       assert.ok((await frecency.score('seed.ts')) > 0, 'A sees the seeded entry');
       // Instance B = a second process: own cache + write queue.
-      const frecencyB = await import(`${dist('frecency.js')}?proc=tombstone`);
+      const frecencyB = await import(`${frecencyUrl}?proc=tombstone`);
       await frecencyB.clear();
       // A's cache is now stale; its next save merges against the tombstoned file.
       await frecency.recordOpen('x.ts');
@@ -58,19 +68,32 @@ describe('stress-round6b: frecency clearedAt tombstone', () => {
       assert.equal(typeof saved.clearedAt, 'number', 'clearedAt survives the merge round-trip');
       assert.equal(await frecencyB.score('seed.ts'), 0, 'B scores the cleared key as 0');
       assert.ok((await frecencyB.score('x.ts')) > 0, 'B scores the post-clear key');
+      } finally {
+        process.chdir(prevCwd);
+      }
     });
   });
 
   it('a pre-tombstone store without clearedAt loads and merges fine', async () => {
-    await withStoreEnv(async () => {
+    await withStoreEnv(async (dir) => {
+      const work = join(dir, 'work');
+      await mkdir(work, { recursive: true });
+      await writeFile(join(work, 'new.ts'), 'x');
+      const prevCwd = process.cwd();
+      const frecencyUrl = dist('frecency.js');
+      process.chdir(work);
+      try {
       const file = frecency.storePath();
       await mkdir(dirname(file), { recursive: true });
       await writeFile(file, JSON.stringify({ entries: { 'old.ts': { count: 2, last: Date.now() } } }));
-      const frecencyC = await import(`${dist('frecency.js')}?proc=oldstore`);
+      const frecencyC = await import(`${frecencyUrl}?proc=oldstore`);
       assert.ok((await frecencyC.score('old.ts')) > 0, 'old-format store scores');
       await frecencyC.recordOpen('new.ts');
       const saved = JSON.parse(await readFile(file, 'utf8'));
       assert.ok(saved.entries['old.ts'] && saved.entries['new.ts'], `both entries survive: ${JSON.stringify(saved)}`);
+      } finally {
+        process.chdir(prevCwd);
+      }
     });
   });
 });

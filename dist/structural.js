@@ -123,8 +123,15 @@ export function normalizeLanguage(lang) {
         return "cpp";
     return "generic";
 }
+/** A row-producing regex that matches "" hits every line of every file. */
+function assertNotMatchAll(source, raw) {
+    if (new RegExp(source).test("")) {
+        throw new Error(`structural "${raw}" matches everything — add a literal atom`);
+    }
+}
 /** Compile one structural pattern to a regex lowering. Throws on empty input,
-unknown kind:, malformed two-phase separators, or >9 distinct metavariables. */
+unknown kind:, malformed two-phase separators, >9 distinct metavariables, or a
+lowering that matches the empty string (`$$$` alone floods every line). */
 export function compileStructural(pattern, opts = {}) {
     const raw = pattern.trim();
     if (!raw)
@@ -171,6 +178,7 @@ export function compileStructural(pattern, opts = {}) {
         if (tag === "inside") {
             const outerT = tokenize(left, []);
             const innerT = tokenize(right, groups);
+            assertNotMatchAll(innerT.source, raw);
             return {
                 source: raw, regex: innerT.source, groups, language, mode: "inside",
                 outer: { regex: outerT.source, description: `outer "${left}"` },
@@ -180,6 +188,7 @@ export function compileStructural(pattern, opts = {}) {
         }
         const targetT = tokenize(left, groups);
         const filterT = tokenize(right, []);
+        assertNotMatchAll(targetT.source, raw);
         return {
             source: raw, regex: targetT.source, groups, language, mode: "has",
             outer: { regex: filterT.source, description: `filter "${right}"` },
@@ -188,6 +197,7 @@ export function compileStructural(pattern, opts = {}) {
         };
     }
     const t = tokenize(raw, groups);
+    assertNotMatchAll(t.source, raw);
     return {
         source: raw, regex: t.source, groups, language, mode: "pattern", hasBackref: t.backref,
         description: `structural "${raw}" [${language}] → single-line regex (approximate, not AST; $VAR one atom, $$$ any incl. empty, $A…$A backreference)`,

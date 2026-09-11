@@ -249,10 +249,19 @@ describe('grepContents bounds (needs core)', () => {
 describe('frecency record/score round-trip (needs core)', () => {
   it('a recorded open scores above an unopened path', async (t) => {
     if (!frecency?.recordOpen || !frecency?.score) return t.skip('core frecency.ts not landed yet');
-    const beforeScore = await frecency.score('/proj/src/b.ts');
-    await frecency.recordOpen('/proj/src/a.ts');
-    const afterA = await frecency.score('/proj/src/a.ts');
-    assert.ok(afterA > beforeScore, `opened path outranks unopened (${afterA} > ${beforeScore})`);
+    // recordOpen stats the path, so the recorded file must exist on disk.
+    const root = await mkdtemp(join(tmpdir(), 'omp-find-freq-'));
+    try {
+      const a = join(root, 'a.ts');
+      const b = join(root, 'b.ts');
+      await writeFile(a, 'x');
+      const beforeScore = await frecency.score(b);
+      await frecency.recordOpen(a);
+      const afterA = await frecency.score(a);
+      assert.ok(afterA > beforeScore, `opened path outranks unopened (${afterA} > ${beforeScore})`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

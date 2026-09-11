@@ -1,6 +1,6 @@
 {
   "name": "omp-find",
-  "version": "0.8.9",
+  "version": "0.8.10",
   "description": "A lighter omp-focused replacement for fff: fast file finding (fffind) and content grep (ffgrep) for Oh My Pi (omp) and pi — no watcher, no LMDB, no picker UI.",
   "type": "module",
   "main": "./dist/extension.js",
