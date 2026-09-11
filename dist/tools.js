@@ -17,6 +17,13 @@ function storeCursor(s) {
     }
     return id;
 }
+/** Resume-param drift notice: a cursor binds page-1 params, so a resume that
+ * also passes new ones silently ignores them. Compare the fields that affect
+ * results and say so in one line instead of erroring — agents legitimately
+ * pass only the cursor. */
+function cursorParamNote(diff) {
+    return diff.length > 0 ? `note: cursor params in effect (${diff.join("/")} from page 1)` : undefined;
+}
 /** Flag > OMP_FIND_MODE env > omp-find.json > override. */
 export function resolveFindMode(explicit, cwd = process.cwd()) {
     if (explicit === "additive" || explicit === "override")
@@ -479,6 +486,8 @@ export function registerFindTools(pi, deps, opts = {}) {
                 let relaxed;
                 let scanned, backend;
                 let bound;
+                let resumeNote;
+                let rawPattern, rawPath;
                 const cursorId = strParam(params, "cursor");
                 if (cursorId) {
                     const st = cursors.get(cursorId);
@@ -491,7 +500,23 @@ export function registerFindTools(pi, deps, opts = {}) {
                     scope = st.scope;
                     maxChars = st.maxChars;
                     concise = st.concise === true;
+                    rawPattern = st.pattern;
+                    rawPath = st.path;
                     bound = { total: st.total, backend: st.backend };
+                    const diff = [];
+                    const inPattern = strParam(params, "pattern");
+                    if (inPattern !== undefined && inPattern !== st.pattern)
+                        diff.push("pattern");
+                    const inPath = strParam(params, "path");
+                    if (inPath !== undefined && inPath !== st.path)
+                        diff.push("path");
+                    const inLimit = numParam(params, "limit");
+                    if (inLimit !== undefined && inLimit !== st.limit)
+                        diff.push("limit");
+                    const inCwd = cwdParam(params);
+                    if (inCwd !== undefined && inCwd !== st.cwd)
+                        diff.push("cwd");
+                    resumeNote = cursorParamNote(diff);
                     const live = await runFind(search, query, scope === undefined ? { cwd, limit: PAGE_MAX, offset: 0 } : { cwd, limit: PAGE_MAX, offset: 0, scope });
                     all = live.paths;
                     scanned = live.scanned;
@@ -499,7 +524,9 @@ export function registerFindTools(pi, deps, opts = {}) {
                 }
                 else {
                     const pattern = strParam(params, "pattern") ?? "";
-                    const dirParam = strParam(params, "path");
+                    rawPattern = pattern;
+                    rawPath = strParam(params, "path");
+                    const dirParam = rawPath;
                     limit = numParam(params, "limit") ?? FIND_PAGE;
                     offset = 0;
                     cwd = cwdParam(params);
@@ -554,20 +581,22 @@ export function registerFindTools(pi, deps, opts = {}) {
                         const dir = slash < 0 ? "." : d.slice(0, slash);
                         byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
                     }
-                    return withDetails(`Matched ${total} files (output exceeds ${maxChars} chars). Per-dir counts: ${countSummary([...byDir])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: scanned ?? total, truncated: true });
+                    return withDetails(`Matched ${total} files (output exceeds ${maxChars} chars). Per-dir counts: ${countSummary([...byDir])}. Refine path/pattern or raise maxChars.${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: total, totalFiles: scanned ?? total, truncated: true });
                 }
                 const hasMore = offset + page.length < total;
                 const details = { totalMatched: total, totalFiles: scanned ?? total, truncated: hasMore };
                 if (hasMore) {
-                    const next = storeCursor(scope === undefined ? { kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars, concise, total, backend } : { kind: "find", query, limit, nextOffset: offset + page.length, cwd, scope, maxChars, concise, total, backend });
+                    const next = storeCursor(scope === undefined ? { kind: "find", query, limit, nextOffset: offset + page.length, cwd, maxChars, concise, total, backend, pattern: rawPattern, path: rawPath } : { kind: "find", query, limit, nextOffset: offset + page.length, cwd, scope, maxChars, concise, total, backend, pattern: rawPattern, path: rawPath });
                     lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
                 if (lines.length === 0)
-                    return withDetails(zeroFind(scanned, backend, relaxed), { totalMatched: 0, totalFiles: scanned ?? 0, truncated: false });
+                    return withDetails(`${zeroFind(scanned, backend, relaxed)}${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: 0, totalFiles: scanned ?? 0, truncated: false });
                 if (!concise && relaxed !== undefined)
                     lines.unshift(`note: no matches for "${relaxed.from}"; showing results for "${relaxed.to}"`, "");
                 if (!concise)
                     lines.push(...nudge("find", total));
+                if (resumeNote !== undefined)
+                    lines.push("", resumeNote);
                 return withDetails(lines.join("\n"), details);
             }
             catch (err) {
@@ -620,6 +649,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 let contextBefore, contextAfter, expand, maxChars, concise;
                 const cursorId = strParam(params, "cursor");
                 let bound;
+                let resumeNote;
                 if (cursorId) {
                     const st = cursors.get(cursorId);
                     if (!st || st.kind !== "grep")
@@ -640,6 +670,28 @@ export function registerFindTools(pi, deps, opts = {}) {
                     maxChars = st.maxChars;
                     concise = st.concise === true;
                     bound = { total: st.total, backend: st.backend };
+                    const diff = [];
+                    const inPattern = strParam(params, "pattern");
+                    if (inPattern !== undefined && inPattern !== st.pattern)
+                        diff.push("pattern");
+                    const inPath = strParam(params, "path");
+                    if (inPath !== undefined && inPath !== st.pathFilter)
+                        diff.push("path");
+                    const inLimit = numParam(params, "limit");
+                    if (inLimit !== undefined && inLimit !== st.limit)
+                        diff.push("limit");
+                    const inCwd = cwdParam(params);
+                    if (inCwd !== undefined && inCwd !== st.cwd)
+                        diff.push("cwd");
+                    if (params["literal"] !== undefined && (params["literal"] === true) !== st.literal)
+                        diff.push("literal");
+                    if (params["ignoreCase"] !== undefined && (params["ignoreCase"] === true) !== st.ignoreCase)
+                        diff.push("ignoreCase");
+                    if (params["wholeWord"] !== undefined && (params["wholeWord"] === true) !== st.wholeWord)
+                        diff.push("wholeWord");
+                    if (params["smartCase"] !== undefined && (params["smartCase"] === true) !== st.smartCase)
+                        diff.push("smartCase");
+                    resumeNote = cursorParamNote(diff);
                 }
                 else {
                     const p = strParam(params, "pattern");
@@ -734,13 +786,13 @@ export function registerFindTools(pi, deps, opts = {}) {
                     for (const m of counted)
                         byFile.set(toDisplay(m.path), (byFile.get(toDisplay(m.path)) ?? 0) + 1);
                     const fileWord = byFile.size === 1 ? "file" : "files";
-                    return withDetails(`Matched ${total}${capped ? "+" : ""} hits in ${byFile.size} ${fileWord} (output exceeds ${maxChars} chars${capped ? ", capped" : ""}). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true, ...(capped ? { capped: true } : {}) });
+                    return withDetails(`Matched ${total}${capped ? "+" : ""} hits in ${byFile.size} ${fileWord} (output exceeds ${maxChars} chars${capped ? ", capped" : ""}). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: total, totalFiles: byFile.size, truncated: true, ...(capped ? { capped: true } : {}) });
                 }
                 const tags = await hashlineTagsFor(cwd, page.map((m) => m.path));
                 const lines = groupGrepBlocks(blocks, tags);
                 if (lines.length === 0) {
                     const backend = typeof res.backend === "string" ? res.backend : undefined;
-                    return withDetails(backend !== undefined ? `0 matches for "${pattern}" (${backend})` : `0 matches for "${pattern}"`, { totalMatched: 0, totalFiles: 0, truncated: false });
+                    return withDetails(`${backend !== undefined ? `0 matches for "${pattern}" (${backend})` : `0 matches for "${pattern}"`}${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: 0, totalFiles: 0, truncated: false });
                 }
                 lines.push(`(${total}${capped ? "+" : ""} match${total === 1 ? "" : "es"} total${capped ? ", capped" : ""})`);
                 if (!concise)
@@ -762,6 +814,8 @@ export function registerFindTools(pi, deps, opts = {}) {
                         lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                     }
                 }
+                if (resumeNote !== undefined)
+                    lines.push("", resumeNote);
                 return withDetails(lines.join("\n"), details);
             }
             catch (err) {
@@ -804,6 +858,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     return text(`${toolName} failed: outline unavailable`);
                 let file, depth, limit, offset, cwd, maxChars, concise;
                 let bound;
+                let resumeNote;
                 const cursorId = strParam(params, "cursor");
                 if (cursorId) {
                     const st = cursors.get(cursorId);
@@ -818,6 +873,20 @@ export function registerFindTools(pi, deps, opts = {}) {
                     maxChars = st.maxChars;
                     concise = st.concise === true;
                     bound = { total: st.total };
+                    const diff = [];
+                    const inPath = strParam(params, "path");
+                    if (inPath !== undefined && inPath !== st.file)
+                        diff.push("path");
+                    const inLimit = numParam(params, "limit");
+                    if (inLimit !== undefined && inLimit !== st.limit)
+                        diff.push("limit");
+                    const inCwd = cwdParam(params);
+                    if (inCwd !== undefined && inCwd !== st.cwd)
+                        diff.push("cwd");
+                    const inDepth = params["depth"];
+                    if (inDepth !== undefined && (inDepth === 1 ? 1 : 0) !== st.depth)
+                        diff.push("depth");
+                    resumeNote = cursorParamNote(diff);
                 }
                 else {
                     const f = strParam(params, "path");
@@ -843,7 +912,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     const byKind = new Map();
                     for (const s of res.symbols)
                         byKind.set(s.kind, (byKind.get(s.kind) ?? 0) + 1);
-                    return withDetails(`Matched ${res.total} symbols in ${disp} (output exceeds ${maxChars} chars). Kind counts: ${countSummary([...byKind])}. Refine path or raise maxChars.`, { totalMatched: res.total, totalFiles: 1, truncated: true });
+                    return withDetails(`Matched ${res.total} symbols in ${disp} (output exceeds ${maxChars} chars). Kind counts: ${countSummary([...byKind])}. Refine path or raise maxChars.${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: res.total, totalFiles: 1, truncated: true });
                 }
                 const hasMore = offset + page.length < res.total;
                 if (hasMore) {
@@ -851,7 +920,8 @@ export function registerFindTools(pi, deps, opts = {}) {
                     lines.push("", `... (${res.total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                 }
                 const details = { totalMatched: res.total, totalFiles: 1, truncated: hasMore };
-                return withDetails(lines.length > 0 ? lines.join("\n") : `No symbols found in ${disp} (approximate scan)`, details);
+                const outlineBody = lines.length > 0 ? lines.join("\n") : `No symbols found in ${disp} (approximate scan)`;
+                return withDetails(resumeNote ? `${outlineBody}\n\n${resumeNote}` : outlineBody, details);
             }
             catch (err) {
                 // Missing-file reads surface raw syscall text + the absolute path —
@@ -898,6 +968,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 let symbol, ignoreCase, pathFilter, exactOnly;
                 let depth, limit, offset, cwd, maxChars;
                 let bound;
+                let resumeNote;
                 const cursorId = strParam(params, "cursor");
                 if (cursorId) {
                     const st = cursors.get(cursorId);
@@ -913,6 +984,27 @@ export function registerFindTools(pi, deps, opts = {}) {
                     cwd = st.cwd;
                     maxChars = st.maxChars;
                     bound = { total: st.total, backend: st.backend };
+                    const diff = [];
+                    const inSymbol = strParam(params, "symbol");
+                    if (inSymbol !== undefined && inSymbol !== st.symbol)
+                        diff.push("symbol");
+                    const inPath = strParam(params, "path");
+                    if (inPath !== undefined && inPath !== st.pathFilter)
+                        diff.push("path");
+                    const inLimit = numParam(params, "limit");
+                    if (inLimit !== undefined && inLimit !== st.limit)
+                        diff.push("limit");
+                    const inCwd = cwdParam(params);
+                    if (inCwd !== undefined && inCwd !== st.cwd)
+                        diff.push("cwd");
+                    if (params["ignoreCase"] !== undefined && (params["ignoreCase"] === true) !== st.ignoreCase)
+                        diff.push("ignoreCase");
+                    if (params["exact_only"] !== undefined && (params["exact_only"] === true) !== st.exactOnly)
+                        diff.push("exact_only");
+                    const inDepth = params["depth"];
+                    if (inDepth !== undefined && (inDepth === 2 ? 2 : inDepth === 3 ? 3 : 1) !== st.depth)
+                        diff.push("depth");
+                    resumeNote = cursorParamNote(diff);
                 }
                 else {
                     const s = strParam(params, "symbol");
@@ -948,7 +1040,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     const byFile = new Map();
                     for (const r of ranked)
                         byFile.set(toDisplay(r.m.path), (byFile.get(toDisplay(r.m.path)) ?? 0) + 1);
-                    return withDetails(`Matched ${total}${capped ? "+" : ""} approximate references to ${symbol} in ${byFile.size} files (output exceeds ${maxChars} chars${capped ? ", capped" : ""}). Per-file counts: ${countSummary([...byFile])}. Refine path or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true, ...(capped ? { capped: true } : {}) });
+                    return withDetails(`Matched ${total}${capped ? "+" : ""} approximate references to ${symbol} in ${byFile.size} files (output exceeds ${maxChars} chars${capped ? ", capped" : ""}). Per-file counts: ${countSummary([...byFile])}. Refine path or raise maxChars.${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: total, totalFiles: byFile.size, truncated: true, ...(capped ? { capped: true } : {}) });
                 }
                 if (!exactOnly && total > 0 && certain.length > 0 && !certain.some((m) => callerCertainty(m.via ?? symbol, m.text, ignoreCase) === "exact")) {
                     lines.unshift(`note: no exact call/import sites for "${symbol}"; ${total}${capped ? "+" : ""} possible mention${total === 1 ? "" : "s"} — confirm with read`, "");
@@ -966,7 +1058,8 @@ export function registerFindTools(pi, deps, opts = {}) {
                         lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                     }
                 }
-                return withDetails(lines.length > 0 ? lines.join("\n") : `No approximate references to ${symbol} found`, details);
+                const callersBody = lines.length > 0 ? lines.join("\n") : `No approximate references to ${symbol} found`;
+                return withDetails(resumeNote ? `${callersBody}\n\n${resumeNote}` : callersBody, details);
             }
             catch (err) {
                 if (/timed out/i.test(errMsg(err)))
@@ -1016,6 +1109,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 let limit, offset, cwd, contextBefore, contextAfter, maxChars;
                 const cursorId = strParam(params, "cursor");
                 let bound;
+                let resumeNote;
                 if (cursorId) {
                     const st = cursors.get(cursorId);
                     if (!st || st.kind !== "structural")
@@ -1032,6 +1126,36 @@ export function registerFindTools(pi, deps, opts = {}) {
                     contextAfter = st.contextAfter;
                     maxChars = st.maxChars;
                     bound = { total: st.total, backend: st.backend };
+                    const diff = [];
+                    const inP = strParam(params, "pattern");
+                    const inS = strParam(params, "symbol");
+                    const inR = strParam(params, "references");
+                    const inGiven = [inP, inS, inR].filter((v) => v !== undefined);
+                    if (inGiven.length > 1)
+                        diff.push("pattern");
+                    else if (inGiven.length === 1) {
+                        const inQuery = inS !== undefined ? `symbol:${inS}` : inR !== undefined ? `references:${inR}` : inP;
+                        if (inQuery !== st.query)
+                            diff.push("pattern");
+                    }
+                    const inPath = strParam(params, "path");
+                    if (inPath !== undefined && inPath !== st.pathFilter)
+                        diff.push("path");
+                    const inLimit = numParam(params, "limit");
+                    if (inLimit !== undefined && inLimit !== st.limit)
+                        diff.push("limit");
+                    const inCwd = cwdParam(params);
+                    if (inCwd !== undefined && inCwd !== st.cwd)
+                        diff.push("cwd");
+                    if (params["ignoreCase"] !== undefined && (params["ignoreCase"] === true) !== st.ignoreCase)
+                        diff.push("ignoreCase");
+                    const inLang = strParam(params, "language");
+                    if (inLang !== undefined && inLang !== st.language)
+                        diff.push("language");
+                    const inRewrite = strParam(params, "rewrite");
+                    if (inRewrite !== undefined && inRewrite !== st.rewrite)
+                        diff.push("rewrite");
+                    resumeNote = cursorParamNote(diff);
                 }
                 else {
                     const p = strParam(params, "pattern");
@@ -1085,10 +1209,10 @@ export function registerFindTools(pi, deps, opts = {}) {
                     const byFile = new Map();
                     for (const r of ranked)
                         byFile.set(toDisplay(r.m.path), (byFile.get(toDisplay(r.m.path)) ?? 0) + 1);
-                    return withDetails(`Matched ${total}${capped ? "+" : ""} approximate structural hits in ${byFile.size} files (output exceeds ${maxChars} chars${capped ? ", capped" : ""}). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true, ...(capped ? { capped: true } : {}) });
+                    return withDetails(`Matched ${total}${capped ? "+" : ""} approximate structural hits in ${byFile.size} files (output exceeds ${maxChars} chars${capped ? ", capped" : ""}). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: total, totalFiles: byFile.size, truncated: true, ...(capped ? { capped: true } : {}) });
                 }
                 if (lines.length === 0) {
-                    return text(backend !== undefined ? `0 structural matches for "${query}" (${backend})` : `0 structural matches for "${query}"`);
+                    return text(`${backend !== undefined ? `0 structural matches for "${query}" (${backend})` : `0 structural matches for "${query}"`}${resumeNote ? `\n\n${resumeNote}` : ""}`);
                 }
                 const hasMore = offset + page.length < total;
                 const details = { totalMatched: total, totalFiles: new Set(filtered.map((m) => m.path)).size, truncated: hasMore, ...(capped ? { capped: true } : {}) };
@@ -1103,6 +1227,8 @@ export function registerFindTools(pi, deps, opts = {}) {
                         lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
                     }
                 }
+                if (resumeNote !== undefined)
+                    lines.push("", resumeNote);
                 return withDetails(lines.join("\n"), details);
             }
             catch (err) {

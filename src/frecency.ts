@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 const HALF_LIFE_MS = 7 * 24 * 3600 * 1000;
 
 interface Entry { count: number; last: number }
-interface Store { entries: Record<string, Entry> }
+interface Store { entries: Record<string, Entry>; clearedAt?: number }
 
 // Null-prototype entries map: `store.entries["__proto__"] = {...}` on a plain
 // object invokes the proto setter and silently drops the key — a path literally
@@ -54,7 +54,10 @@ async function readDisk(file: string): Promise<Store> {
         entries[k] = { count, last };
       }
     }
-    return { entries };
+    // Tombstone: a clear() stamps `clearedAt`; merge-on-save drops entries
+    // older than it so a stale in-memory cache can't resurrect cleared keys.
+    const clearedAt = Number(parsed?.clearedAt);
+    return { entries, ...(Number.isFinite(clearedAt) ? { clearedAt } : {}) };
   } catch { return fresh(); }
 }
 
@@ -68,14 +71,30 @@ async function load(file: string): Promise<Store> {
 /** Atomic persist: sidecar write + fsync, then copyFile over live (never rename-over-live on Windows).
  * With `merge` the live file is re-read first and folded in per key — max count,
  * max last — so a concurrent process's batch survives instead of being clobbered
- * (last-writer-wins → merge-on-save). Monotonic, so the merge can only add or
- * raise entries; mutating `store` also freshens the shared cache. Remaining
- * limit: no lock — simultaneous same-key writes keep the max, not the sum, so
- * counts can under-count across processes. */
+ * (last-writer-wins → merge-on-save). The `clearedAt` tombstone is the one
+ * exception to monotonicity: entries last-touched before the newest clear() are
+ * dropped on both sides, so a stale cache can't resurrect cleared keys.
+ * Mutating `store` also freshens the shared cache. Remaining limit: no lock —
+ * simultaneous same-key writes keep the max, not the sum, so counts can
+ * under-count across processes. */
 async function save(store: Store, file: string, merge = false): Promise<void> {
   if (merge) {
     const disk = await readDisk(file);
+    // Tombstone wins over entries: anything last-touched before the newest
+    // clear() is dead, whether it lives in this store or on disk.
+    const tombstone = Math.max(store.clearedAt ?? 0, disk.clearedAt ?? 0);
+    if (tombstone > 0) store.clearedAt = tombstone;
+    // A tombstone in the future means the clock regressed (or was patched) —
+    // timestamp ordering is meaningless then, so the drop rule stays inert
+    // rather than eating every entry written under the skewed clock.
+    const drop = tombstone > 0 && tombstone <= Date.now();
+    if (drop) {
+      for (const [k, e] of Object.entries(store.entries)) {
+        if (e.last < tombstone) delete store.entries[k];
+      }
+    }
     for (const [k, e] of Object.entries(disk.entries)) {
+      if (drop && e.last < tombstone) continue;
       const cur = store.entries[k];
       store.entries[k] = cur === undefined ? e : { count: Math.max(cur.count, e.count), last: Math.max(cur.last, e.last) };
     }
@@ -148,6 +167,7 @@ export async function clear(): Promise<void> {
   return enqueueWrite(async () => {
     try {
       const next = fresh();
+      next.clearedAt = Date.now();
       cache = next;
       await save(next, storePath());
     } catch { /* best-effort */ }

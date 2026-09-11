@@ -131,9 +131,10 @@ export interface MapOptions {
 }
 export declare function rankMap(opts?: MapOptions): Promise<MapResult>;
 /** ffcapsule core: fused symbol dossier from existing cores only (no new scan
- * machinery). Definition = first name-matching non-import depth-0 outline row
- * across the most-mentioned candidate files (capped at 30); doc = up to 5
- * contiguous comment lines above it; callers/imports = bounded live queries. */
+ * machinery). Definition = first name-matching non-import depth-1 outline row
+ * (methods included — a depth-0 pass can't see them) across the most-mentioned
+ * candidate files (capped at 30); doc = up to 5 contiguous comment lines above
+ * it; callers/imports = bounded live queries. */
 export interface CapsuleResult {
     symbol: string;
     found: boolean;

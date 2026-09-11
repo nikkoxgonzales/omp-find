@@ -162,6 +162,12 @@ export function compileStructural(pattern, opts = {}) {
         const right = rest.slice(at + sep.length).trim();
         if (!left || !right)
             throw new Error(`${tag}: needs non-empty OUTER and INNER around "${sep}"`);
+        // Operands are plain patterns — a combinator prefix here means the user
+        // chained combinators (`inside: inside: x >> y`), which used to compile
+        // the prefix as literal text and silently match nothing.
+        if (/^(?:kind|symbol|references|inside|has):/.test(left) || /^(?:kind|symbol|references|inside|has):/.test(right)) {
+            throw new Error(`${tag}: combinators cannot be chained — operands must be plain patterns (got "${left}" ${sep} "${right}")`);
+        }
         if (tag === "inside") {
             const outerT = tokenize(left, []);
             const innerT = tokenize(right, groups);

@@ -2,6 +2,23 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.7]
+
+### Fixed
+
+- `export async function` / `async function` now outlined (TS/JS, Rust `pub async fn`, generic rule) — previously invisible to ffoutline/ffmap and the capsule def-hunt.
+- `ffcallers` depth>=2 runs frontier symbols through a bounded parallel pool (8) — walker depth-2 on a ~400-file tree dropped from ~65s to ~12s.
+- `ffcapsule` def-detection outlines candidates at depth 1 — methods (e.g. `constructor`) now resolve as definitions.
+- Chained structural combinators (`inside: inside:`, `has: … << has:`) now error cleanly instead of silently compiling to literal text.
+- Call sites past column 500 are verified against the full source line (per-file cache) instead of the truncated row text — no longer dropped.
+- Oversized regexes (64KB+) surface the normalized `invalid regex` error (V8 lazy-compile forced at preflight; pattern text truncated to 200 chars in messages).
+- Core `scope` values escaping the scan root (`../x`, absolute) now throw instead of silently widening to a full-tree scan.
+- rg `[Omitted long line]` rows keep their real column (byte-col conversion early-out).
+- Walker zero-width match at EOF without trailing newline now matches rg exactly.
+- `status()` distinguishes missing rg (ENOENT) from present-but-failed (exit N / spawn error).
+- Frecency `clear()` stamps a `clearedAt` tombstone — a stale in-memory cache in another instance can no longer resurrect cleared entries via merge-on-save.
+- Cursor resume with different params appends a `note: cursor params in effect` line (stored page-1 params still drive the fetch).
+
 ## [0.8.6]
 
 ### Fixed

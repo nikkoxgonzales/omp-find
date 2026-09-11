@@ -14,7 +14,7 @@ const WORD = "[A-Za-z_]\\w*";
 /** `nested` rules only apply at depth 1 (indented members); others match at any depth. */
 const TS = [
     { re: new RegExp(`^(?:export\\s+)?(?:default\\s+)?(?:abstract\\s+)?class\\s+(${IDENT})`), kind: "class", nameIdx: 1 },
-    { re: new RegExp(`^(?:export\\s+)?(?:default\\s+)?function\\s*\\*?\\s*(${IDENT})`), kind: "function", nameIdx: 1 },
+    { re: new RegExp(`^(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?function\\s*\\*?\\s*(${IDENT})`), kind: "function", nameIdx: 1 },
     { re: new RegExp(`^(?:export\\s+)?interface\\s+(${IDENT})`), kind: "interface", nameIdx: 1 },
     { re: new RegExp(`^(?:export\\s+)?(?:const\\s+)?enum\\s+(${IDENT})`), kind: "enum", nameIdx: 1 },
     { re: new RegExp(`^(?:export\\s+)?type\\s+(${IDENT})`), kind: "type", nameIdx: 1 },
@@ -30,7 +30,7 @@ const GO = [
     { re: new RegExp(`^type\\s+(${WORD})`), kind: "type", nameIdx: 1 },
 ];
 const RUST = [
-    { re: /^(?:pub(?:\([^)]*\))?\s+)?(fn|struct|enum|trait|mod)\s+([A-Za-z_]\w*)/, kind: "", nameIdx: 2 },
+    { re: /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(fn|struct|enum|trait|mod)\s+([A-Za-z_]\w*)/, kind: "", nameIdx: 2 },
     { re: /^impl\s+(?:<[^>]*>\s*)?([A-Za-z_][\w:]*)/, kind: "impl", nameIdx: 1 },
 ];
 const JAVA = [
@@ -44,7 +44,7 @@ const CPP = [
 ];
 /** Unknown extensions: only the unambiguous cross-language keywords. */
 const GENERIC = [
-    { re: new RegExp(`^(class|function|def|fn|func|interface|enum|struct|type)\\s+(${WORD})`), kind: "", nameIdx: 2 },
+    { re: new RegExp(`^(?:async\\s+)?(class|function|def|fn|func|interface|enum|struct|type)\\s+(${WORD})`), kind: "", nameIdx: 2 },
 ];
 /** Method-name blocklist: control-flow/calls that mimic a signature. Own-
  * property test only — `constructor`, `toString` & friends are real method

@@ -267,9 +267,16 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 - An `fffind` `path` that resolves to a file is consumed by the pin — the pin text isn't also fuzzy-matched (pin + empty pattern lists the file; pin + pattern matches within the filename).
 - A `path` that escapes the scan root (`../x`, absolute paths) errors instead of silently scanning the full tree.
 - `ffoutline` `path` resolves under `cwd` but isn't confined to it — `../x` and absolute paths read outside the scan root.
-- `wholeWord` boundaries are JS-identifier `[\w$]` on both backends — differs from `rg -w` at `$` and unicode edges.
+- `wholeWord` boundaries are JS-identifier `[\w$]` on both backends (intended) — differs from `rg -w` at `$` and unicode edges.
 - rg match columns are character-based (byte offsets converted post-0.8.6); walker cols are already char-based.
 - A leading `(?i)` in a `literal:false` pattern maps to `ignoreCase`.
+- Cursor resume runs on page-1 params: extra params passed alongside `cursor` are ignored and flagged with a `note: cursor params in effect (…)` line.
+- Loading the extension twice shares one module graph — cursor store, session stats, and the frecency cache are process-global, so a `/find-rescan` in one load clears both.
+- Frecency `clear()` stamps a `clearedAt` tombstone; merge-on-save drops entries older than it, so a stale process can't resurrect cleared keys.
+- `ffcallers` `depth` 2|3 fetches each BFS ring in parallel — transitive depth costs one round-trip per ring, not per symbol.
+- `ffoutline` covers `export async function` declarations alongside plain `function`.
+- `ffstructural` `inside:`/`has:` take one `OUTER >> INNER` / `OUTER << INNER` pair — chained combinators (`inside: a >> b >> c`) are rejected, not nested.
+- `concise` exists only on `fffind`/`ffgrep`/`ffoutline`; other tools ignore it.
 
 ## Config
 

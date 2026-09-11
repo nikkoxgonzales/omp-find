@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.6). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.7). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -87,7 +87,10 @@ throws (`recordOpen`/`score`/`clear` all swallow). Writes serialize through an
 in-process queue (parallel `recordOpen` calls no longer lose bumps); across
 processes each save re-reads the file and merges per key (max count, max last)
 instead of last-writer-wins — no lock, so simultaneous same-key bumps can
-still under-count.
+still under-count. `clear()` also stamps a `clearedAt` tombstone in the store
+file; merge-on-save drops entries last-touched before the newest tombstone on
+both sides, so a stale in-memory cache can't resurrect cleared keys. Stores
+written before the tombstone existed (no `clearedAt`) load unchanged.
 
 ## Pagination
 
@@ -98,6 +101,11 @@ Default 30, max 50, enforced in two places: `numParam` clamps tool params
 pattern/literal/ignoreCase/pathFilter/…). Footer when more remain:
 `... (N more; pass cursor "…" for the next page)` (`tools.ts:139–142, 196–201`).
 Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap or a rename/content-preserving mutation between pages is invisible to resume. Resume is a stateless re-fetch — resuming the same cursor twice returns the same rows and mints a fresh cursor id each time. Grep pages are path/line/col ordered on both backends.
+Resume runs on page-1 params: extra params passed alongside `cursor` are
+ignored and flagged with a `note: cursor params in effect (…)` line rather
+than silently applied or rejected. Loading the extension twice shares one
+module graph — the cursor store, session stats, and frecency cache are
+process-global, so a `/find-rescan` in one load clears both.
 Capped grep-family results (`capped: true`, `N+` totals) mint no cursor — pages
 beyond `GREP_CAP` don't exist; the footer instead says `capped result set —
 narrow the query for full results`. The store is FIFO-200 with no TTL:
@@ -192,7 +200,8 @@ counts, grep/callers/structural→per-file counts, outline→kind counts) comple
 
 - **`ffoutline`** (`outline` alias) — `src/outline.ts`: `outlineFile(file, {cwd,
   depth, limit, offset})` → `{symbols: {line, col, kind, name}[], total}`.
-  Pure-TS regex table per language (TS/JS class|function|interface|enum|type|
+  Pure-TS regex table per language (TS/JS class|function — `export async
+  function` included — |interface|enum|type|
   const-arrow + depth-1 methods; Python def/class; Go func/type; Rust
   fn/struct/enum/trait/mod/impl; Java/C# class|interface|enum|record|struct +
   depth-1 methods; C/C++ coarse; generic fallback). Depth 0 = unindented only;
@@ -213,14 +222,16 @@ counts, grep/callers/structural→per-file counts, outline→kind counts) comple
   over the same 3-pattern matcher — cycle-guarded via the visited `path:line`
   set, merged rings hard-capped by `GREP_CAP`, every row labeled `depth:N`
   (`tagCallerRows` `showDepth`, on only for depth 2|3 so depth-1 output is
-  byte-identical); each row records its ring symbol (`GrepMatch.via`) so
+  byte-identical); rings are fetched in parallel (one round-trip per depth
+  level, not per symbol); each row records its ring symbol (`GrepMatch.via`) so
   certainty/`exact_only` judge transitive rows against their own ring, not the
   root query; downstream callees explicitly out of scope.
 - **`ffstructural`** (`structural` alias) — `src/structural.ts`:
   `compileStructural(pattern, {language})` lowers the ast-grep subset
   (`$VAR` identifier/string atom, `$$$` zero-or-more, `$A…$A` backreference,
   `kind:` line shapes, `symbol:` def lines, `references:` delegation,
-  `inside: A >> B` / `has: A << B` file-scoped two-phase) to single-line
+  `inside: A >> B` / `has: A << B` file-scoped two-phase — one pair only;
+  chained combinators like `inside: a >> b >> c` are rejected) to single-line
   regexes; `structuralGrep` runs them via `grepContents` (`literal: false`)
   or `callersOf`, forcing the walker (`scan: "mock"`) when a backreference
   is present because rg's engine rejects `\N`. `previewRewrite` fills
@@ -246,7 +257,7 @@ counts, grep/callers/structural→per-file counts, outline→kind counts) comple
   `in <kind> <name>` headers (consecutive same-symbol collapse, outline-miss
   rows stay bare, `concise` suppresses headers); `expand` travels in cursor
   state like context.
-- **`concise` density** — opt-in param on find/grep/outline: paths-only rows, `path:line` probes (context and expand suppressed), name-only outlines. Same ranking and paging, carried in cursor state.
+- **`concise` density** — opt-in param on `fffind`/`ffgrep`/`ffoutline` only (other tools ignore it): paths-only rows, `path:line` probes (context and expand suppressed), name-only outlines. Same ranking and paging, carried in cursor state.
 - **Budgeted nudges** — `tools.ts` `nudge()`: one rotating cross-tool tip appended to non-trivial results (hits > 5), 3 per tool per process; trivial calls stay clean. Footer-only, never blocks or redirects.
 - **Cursor ids** — `storeCursor` prefixes per kind (`find_c`/`grep_c`/`outline_c`/
   `callers_c`/`structural_c`), 200-entry cap, unchanged eviction.

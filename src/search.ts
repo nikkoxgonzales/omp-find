@@ -128,14 +128,18 @@ function decodeGrepText(buf: Buffer): string | null {
 /** Explicit-pin scope: workspace-relative path forwarded from the tools layer
  * (concrete `dir/` or `dir/file` pins only — never globs or bare basenames).
  * Normalized here so every backend treats the same pin the same way: leading
- * `./` and trailing slashes stripped, backslashes unified, absolute paths and
- * `..` escapes rejected (undefined = no scope, today's full-tree scan). */
+ * `./` and trailing slashes stripped, backslashes unified. Escape-shaped
+ * scopes (`..` segments, absolute paths, drive pins) throw — mirroring the
+ * tools layer's scopePin — because collapsing them to undefined would read
+ * as "no scope" and silently widen to a full-tree scan. */
 function normalizeScope(scope: string | undefined): string | undefined {
   if (!scope) return undefined;
   const noDot = scope.replace(/\\/g, "/").startsWith("./") ? scope.replace(/\\/g, "/").slice(2) : scope.replace(/\\/g, "/");
   const segs = noDot.split("/").filter(Boolean);
-  if (segs.length === 0 || segs.includes("..")) return undefined;
-  if (/^[A-Za-z]:$/.test(segs[0]) || noDot.startsWith("/")) return undefined;
+  if (segs.length === 0) return undefined; // "./" alone: degenerate, not escape-shaped
+  if (noDot.startsWith("/") || segs.includes("..") || /^[A-Za-z]:$/.test(segs[0] ?? "")) {
+    throw new Error(`path escapes the scan root: ${scope}`);
+  }
   return segs.join("/");
 }
 async function walkFiles(cwd: string, follow: boolean, deadline = 0, timeoutMs = 0, scope?: string): Promise<string[]> {
@@ -281,6 +285,10 @@ export async function findPaths(query: string, opts: FindOptions = {}): Promise<
 function byteColToCharCol(text: string, byteCol: number): number {
   const n = byteCol - 1;
   if (n <= 0) return byteCol;
+  // A byte col past the text's byte length (rg's "[Omitted long matching
+  // line]" placeholder rows carry the real match col) passes through
+  // unchanged — decoding a clamped prefix would mangle it to text.length+1.
+  if (n > Buffer.byteLength(text, "utf8")) return byteCol;
   const prefix = text.slice(0, n);
   let ascii = prefix.length === n;
   if (ascii) for (let i = 0; i < prefix.length; i++) { if (prefix.charCodeAt(i) > 0x7f) { ascii = false; break; } }
@@ -309,6 +317,9 @@ async function rgGrep(cwd: string, pattern: string, literal: boolean, ignoreCase
   }
   return out;
 }
+/** Pattern text embedded in `invalid regex` errors, truncated so a 64KB+
+ * pattern can't produce a 64KB+ message (the raw-V8-message bug in miniature). */
+const patForMsg = (p: string): string => (p.length > 200 ? `${p.slice(0, 200)}…` : p);
 /** Regex walk+scan shared by the worker thread (grep-worker.ts imports this).
  * Exported for the worker and for tests comparing worker output to the inline
  * scan; not part of the tool contract. */
@@ -331,9 +342,18 @@ export async function walkerRegexGrep(cwd: string, pattern: string, literal: boo
     // class, matching rg's acceptance of the same source.
     if (wantsU && err instanceof SyntaxError) {
       try { re = new RegExp(wrapped, ignoreCase ? "gi" : "g"); }
-      catch { throw new Error(`invalid regex: ${pattern}`); }
-    } else throw new Error(`invalid regex: ${pattern}`);
+      catch { throw new Error(`invalid regex: ${patForMsg(pattern)}`); }
+    } else throw new Error(`invalid regex: ${patForMsg(pattern)}`);
   }
+  // V8 lazy-compiles: `new RegExp` can succeed on a 64KB+ source and only throw
+  // at first exec — inside the worker, surfacing the raw V8 message. Force the
+  // compile here so the normalized `invalid regex` error fires at preflight.
+  try { re.exec(""); }
+  catch (err) {
+    if (err instanceof SyntaxError) throw new Error(`invalid regex: ${patForMsg(pattern)}`);
+    throw err;
+  }
+  re.lastIndex = 0;
   const out: GrepMatch[] = [];
   for (const f of await walkFiles(cwd, follow, deadline, timeoutMs, scope)) {
     checkDeadline(deadline, timeoutMs); // per file batch: abort the orphaned scan between reads
@@ -346,9 +366,21 @@ export async function walkerRegexGrep(cwd: string, pattern: string, literal: boo
     const lines = splitLines(text);
     for (let i = 0; i < lines.length; i++) {
       const snippet = lines[i].replace(/\r/g, "").trim().slice(0, 500); // strip \r: \r-only files embed raw CRs that overwrite terminal rows
+      const lastNoEol = i === lines.length - 1 && !text.endsWith("\n");
       re.lastIndex = 0;
       let m: RegExpExecArray | null;
-      while ((m = re.exec(lines[i])) !== null) {
+      for (;;) {
+        try { m = re.exec(lines[i]); }
+        catch (err) {
+          // A lazy-compile SyntaxError that slipped past the preflight exec
+          // reports the normalized message, never raw V8 text.
+          if (err instanceof SyntaxError) throw new Error(`invalid regex: ${patForMsg(pattern)}`);
+          throw err;
+        }
+        if (m === null) break;
+        // rg omits the terminal zero-width position on a file-final line that
+        // has no trailing newline (the walker used to emit lastLine:len+1).
+        if (m[0] === "" && lastNoEol && m.index === lines[i].length) break;
         out.push({ path: toNative(f), line: i + 1, col: m.index + 1, text: snippet });
         if (out.length >= GREP_CAP) return out;
         if (m[0] === "") { re.lastIndex = m.index + 1; if (re.lastIndex > lines[i].length) break; } // zero-width rows still emit (rg parity for ^, ^$, z*)
@@ -487,7 +519,14 @@ export async function grepContents(pattern: string, opts: GrepOptions = {}): Pro
   let pat = pattern;
   let inlineIgnoreCase = false;
   if (!literal && pat.startsWith("(?i)")) { pat = pat.slice(4); inlineIgnoreCase = true; }
-  if (!literal) { try { new RegExp(pat); } catch { throw new Error(`invalid regex: ${pattern}`); } }
+  if (!literal) {
+    try {
+      const pre = new RegExp(pat);
+      // V8 lazy-compiles: a 64KB+ source can pass construction and only throw
+      // at first exec — force it here so the normalized error fires now.
+      pre.exec("");
+    } catch { throw new Error(`invalid regex: ${patForMsg(pattern)}`); }
+  }
   const follow = opts.followSymlinks ?? false;
   // smartCase is opt-in and wins when enabled: lowercase patterns match
   // case-insensitively, any uppercase letter restores sensitivity. ignoreCase
@@ -590,6 +629,22 @@ async function directCallers(sym: string, base: { cwd?: string; ignoreCase: bool
   const verifyCall = new RegExp(`(?<![\\w$])${esc}(?![\\w$])\\s*\\(`, flags);
   const verifyImport = new RegExp(`(?:import|from|require|use|include)\\b[^\\n]*(?<![\\w$])${esc}(?![\\w$])`, flags);
   const verify = [verifyCall, verifyImport, null];
+  // m.text is the 500-char-sliced row text — a call site past col 500 (or rg's
+  // "[Omitted long matching line]" placeholder) can't be verified against it.
+  // Re-read the full line once per file when the slice can't decide.
+  const cwdDir = path.resolve(base.cwd ?? process.cwd());
+  const lineCache = new Map<string, string[] | null>();
+  const fullLine = async (m: GrepMatch): Promise<string | undefined> => {
+    let lines = lineCache.get(m.path);
+    if (lines === undefined) {
+      try {
+        if ((await fs.stat(path.join(cwdDir, m.path))).size > MAX_GREP_BYTES) lines = null;
+        else lines = splitLines(decodeGrepText(await fs.readFile(path.join(cwdDir, m.path))) ?? "");
+      } catch { lines = null; }
+      lineCache.set(m.path, lines);
+    }
+    return lines?.[m.line - 1];
+  };
   let backend: ScanBackend = "rg";
   const fresh: GrepMatch[] = [];
   for (let pi = 0; pi < patterns.length; pi++) {
@@ -597,7 +652,10 @@ async function directCallers(sym: string, base: { cwd?: string; ignoreCase: bool
     backend = r.backend;
     const v = verify[pi];
     for (const m of r.matches) {
-      if (v !== null && !v.test(m.text)) continue;
+      if (v !== null && !v.test(m.text)) {
+        const line = await fullLine(m);
+        if (line === undefined || !v.test(line)) continue;
+      }
       if (defRe.test(m.text)) continue;
       const key = `${m.path}:${m.line}`;
       if (seen.has(key)) continue;
@@ -660,11 +718,25 @@ export async function callersOf(symbol: string, opts: CallersOptions = {}): Prom
   for (let ring = 1; ring <= depth && frontier.length > 0 && seen.size < GREP_CAP; ring++) {
     const ringFresh: GrepMatch[] = [];
     const next: string[] = [];
-    for (const sym of frontier) {
-      const r = await directCallers(sym, base, seen, ring);
+    // Frontier symbols scan in parallel through a bounded pool: each
+    // directCallers runs 3 full-tree greps, so sequential rings cost
+    // 3×|frontier| scans (depth-2 on a wide tree took ~65s). Results land in
+    // frontier order — the `seen` merge inside directCallers stays the single
+    // writer, so dedup/cap semantics are unchanged.
+    const results: Array<{ backend: ScanBackend; fresh: GrepMatch[] } | undefined> = new Array(frontier.length);
+    let idx = 0;
+    const POOL = 8;
+    const workers = Array.from({ length: Math.min(POOL, frontier.length) }, async () => {
+      while (idx < frontier.length && seen.size < GREP_CAP) {
+        const i = idx++;
+        results[i] = await directCallers(frontier[i], base, seen, ring);
+      }
+    });
+    await Promise.all(workers);
+    for (const r of results) {
+      if (!r) continue;
       backend = r.backend;
       ringFresh.push(...r.fresh);
-      if (seen.size >= GREP_CAP) break;
     }
     if (ring < depth && seen.size < GREP_CAP) {
       for (const name of await enclosingNames(opts.cwd, ringFresh)) {
@@ -769,9 +841,10 @@ export async function rankMap(opts: MapOptions = {}): Promise<MapResult> {
   return { files: out, total: out.length, scanned: files.length, backend };
 }
 /** ffcapsule core: fused symbol dossier from existing cores only (no new scan
- * machinery). Definition = first name-matching non-import depth-0 outline row
- * across the most-mentioned candidate files (capped at 30); doc = up to 5
- * contiguous comment lines above it; callers/imports = bounded live queries. */
+ * machinery). Definition = first name-matching non-import depth-1 outline row
+ * (methods included — a depth-0 pass can't see them) across the most-mentioned
+ * candidate files (capped at 30); doc = up to 5 contiguous comment lines above
+ * it; callers/imports = bounded live queries. */
 export interface CapsuleResult {
   symbol: string; found: boolean;
   defFile?: string; defLine?: number; defKind?: string;
@@ -806,8 +879,10 @@ export async function capsuleOf(symbol: string, opts: CapsuleOptions = {}): Prom
   }
   let def: { file: string; line: number; kind: string } | undefined;
   for (const f of ordered) {
+    // depth 1: methods (constructor, toString, …) are nested symbols — a
+    // depth-0 pass can never see them, so capsuleOf('constructor') missed.
     let syms: OutlineSymbol[];
-    try { syms = (await outlineFile(f, { cwd, depth: 0 })).symbols; } catch { continue; }
+    try { syms = (await outlineFile(f, { cwd, depth: 1 })).symbols; } catch { continue; }
     const hit = syms.find((s) => eq(s.name, symbol) && s.kind !== "import") ?? syms.find((s) => eq(s.name, symbol));
     if (hit) { def = { file: f, line: hit.line, kind: hit.kind || "symbol" }; break; }
   }
@@ -849,7 +924,15 @@ export function status(): string {
       const version = r.stdout.split("\n")[0].trim();
       return `rg: ${version}; backend: rg; index: none (fresh scan, no watcher)`;
     }
-  } catch { /* rg missing → walker fallback below */ }
+    // rg resolved on PATH but failed: spawn error (EACCES/EINVAL) or a
+    // nonzero exit — report it as present-but-broken, not missing.
+    if (r.error) {
+      const code = errCode(r.error);
+      if (code === "ENOENT") return "rg: missing; backend: walker (fallback); index: none (fresh scan, no watcher)";
+      return `rg: present but failed (${String(code ?? r.error.message)}); backend: walker (fallback); index: none (fresh scan, no watcher)`;
+    }
+    return `rg: present but failed (exit ${String(r.status ?? r.signal)}); backend: walker (fallback); index: none (fresh scan, no watcher)`;
+  } catch { /* synchronous spawn throw → treated as missing below */ }
   return "rg: missing; backend: walker (fallback); index: none (fresh scan, no watcher)";
 }
 /** Drop caches (nothing persistent — resolves for the `/find-rescan` contract). */
