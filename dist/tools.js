@@ -168,6 +168,139 @@ async function safeScore(frecency, p) {
 function toDisplay(p) {
     return p.replace(/\\/g, "/");
 }
+/** xxHash32 primes (seed 0 throughout the hashline tag path). */
+const XXH_P1 = 0x9e3779b1;
+const XXH_P2 = 0x85ebca77;
+const XXH_P3 = 0xc2b2ae3d;
+const XXH_P4 = 0x27d4eb2f;
+const XXH_P5 = 0x165667b1;
+function xxhRotl(x, r) {
+    return ((x << r) | (x >>> (32 - r))) | 0;
+}
+function xxhRead32(b, p) {
+    return (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) | 0;
+}
+function xxhRound(acc, input) {
+    acc = (acc + Math.imul(input, XXH_P2)) | 0;
+    acc = xxhRotl(acc, 13);
+    return Math.imul(acc, XXH_P1) | 0;
+}
+/** Standard xxHash32 over raw bytes. Stripe rounds use P2/rotl13/P1; the
+ * leftover 4-byte tail lane uses P3/rotl17/P4. NO lane-merge round after
+ * combining v1..v4 (that merge belongs to XXH64): h is rotl(v1,1)+
+ * rotl(v2,7)+rotl(v3,12)+rotl(v4,18), then len, tail, avalanche. Every
+ * multiply is Math.imul — plain `*` overflows float64 past 2^53 and
+ * silently mismatches. */
+export function xxh32Bytes(bytes, seed = 0) {
+    const len = bytes.length;
+    let p = 0;
+    let h;
+    if (len >= 16) {
+        let v1 = (((seed + XXH_P1) | 0) + XXH_P2) | 0;
+        let v2 = (seed + XXH_P2) | 0;
+        let v3 = seed | 0;
+        let v4 = (seed - XXH_P1) | 0;
+        while (p + 16 <= len) {
+            v1 = xxhRound(v1, xxhRead32(bytes, p));
+            p += 4;
+            v2 = xxhRound(v2, xxhRead32(bytes, p));
+            p += 4;
+            v3 = xxhRound(v3, xxhRead32(bytes, p));
+            p += 4;
+            v4 = xxhRound(v4, xxhRead32(bytes, p));
+            p += 4;
+        }
+        h = (xxhRotl(v1, 1) + xxhRotl(v2, 7) + xxhRotl(v3, 12) + xxhRotl(v4, 18)) | 0;
+    }
+    else {
+        h = (seed + XXH_P5) | 0;
+    }
+    h = (h + len) | 0;
+    while (p + 4 <= len) {
+        h = (h + Math.imul(xxhRead32(bytes, p), XXH_P3)) | 0;
+        h = xxhRotl(h, 17);
+        h = Math.imul(h, XXH_P4) | 0;
+        p += 4;
+    }
+    while (p < len) {
+        h = (h + Math.imul(bytes[p], XXH_P5)) | 0;
+        h = xxhRotl(h, 11);
+        h = Math.imul(h, XXH_P1) | 0;
+        p += 1;
+    }
+    h ^= h >>> 15;
+    h = Math.imul(h, XXH_P2) | 0;
+    h ^= h >>> 13;
+    h = Math.imul(h, XXH_P3) | 0;
+    h ^= h >>> 16;
+    return h >>> 0;
+}
+/** 4-hex hashline content tag for whole-file text (path contributes zero
+ * bytes). Pipeline mirrors hashline_file_hash (pi-natives edit.rs) over
+ * store::file_hash (pi-edit store.rs): strip exactly one leading U+FEFF BOM,
+ * normalize CRLF and lone CR to LF, per line rstrip ' '/'\t'/'\r' while
+ * preserving LF structure (split_inclusive('\n') semantics), then xxh32
+ * low 16 bits as 4 uppercase hex chars. */
+export function hashlineFileHash(text) {
+    let body = text.startsWith("\uFEFF") ? text.slice(1) : text;
+    if (body.includes("\r"))
+        body = body.replace(/\r\n?/g, "\n");
+    const parts = body.split("\n");
+    let normalized = "";
+    for (let i = 0; i < parts.length; i++) {
+        normalized += parts[i].replace(/[ \t\r]+$/, "");
+        if (i < parts.length - 1)
+            normalized += "\n";
+    }
+    return ((xxh32Bytes(new TextEncoder().encode(normalized), 0) & 0xffff).toString(16).toUpperCase().padStart(4, "0"));
+}
+/** `[displayPath#TAG]` section header for a file's whole text. */
+export function hashlineHeader(displayPath, text) {
+    return `[${displayPath}#${hashlineFileHash(text)}]`;
+}
+/** Whole-file hashline tags for one grep page: each file read once per call
+ * (files already on disk post-search), backend-agnostic (rg + walker share
+ * it). Unreadable/binary files get no tag — their rows still render, just
+ * without a header. Never throws. */
+async function hashlineTagsFor(cwdDir, files) {
+    const cwd = path.resolve(cwdDir ?? process.cwd());
+    const tags = new Map();
+    await Promise.all([...new Set(files)].map(async (f) => {
+        try {
+            const buf = await fs.promises.readFile(path.join(cwd, f));
+            if (buf.indexOf(0) >= 0)
+                return; // binary skip (same rule as the walker)
+            tags.set(f, hashlineFileHash(buf.toString("utf8")));
+        }
+        catch { /* missing/unreadable → rows render without a header */ }
+    }));
+    return tags;
+}
+/** Group one page of per-match row blocks by file (first-seen file order,
+ * page order within a file) and prefix each group with its hashline header.
+ * Backends already emit file-contiguous pages, so grouping is a no-op on
+ * order there; run-length output would be identical. */
+function groupGrepBlocks(blocks, tags) {
+    const order = [];
+    const buckets = new Map();
+    for (const b of blocks) {
+        let bucket = buckets.get(b.path);
+        if (bucket === undefined) {
+            bucket = [];
+            buckets.set(b.path, bucket);
+            order.push(b.path);
+        }
+        bucket.push(...b.rows);
+    }
+    const out = [];
+    for (const p of order) {
+        const tag = tags.get(p);
+        if (tag !== undefined)
+            out.push(`[${toDisplay(p)}#${tag}]`);
+        out.push(...(buckets.get(p) ?? []));
+    }
+    return out;
+}
 /** Tools-layer path filter for ffgrep (dir/ prefix, glob, or bare name). */
 function applyPathFilter(paths, filter, glob) {
     const f = filter.startsWith("./") ? filter.slice(2) : filter;
@@ -228,21 +361,6 @@ function renderGrepRows(m) {
 /** Expand knob: only "function" enables enclosing-symbol attribution, anything else is "none". */
 function expandParam(params) {
     return strParam(params, "expand") === "function" ? "function" : "none";
-}
-/** Interleave `in <kind> <name>` attribution headers over one page of matches
-(consecutive same-symbol headers collapse to one; untagged matches stay bare).
-Approximate and line-anchored — confirm with read. */
-function renderExpandedGrepRows(page) {
-    const out = [];
-    let last = "";
-    for (const m of page) {
-        const head = m.enclosing ? `in ${m.enclosing.kind} ${m.enclosing.name}` : "";
-        if (head !== "" && head !== last)
-            out.push(head);
-        last = head;
-        out.push(...renderGrepRows(m));
-    }
-    return out;
 }
 function asFindScanned(v) {
     // Named-const cast with reason: typeof-narrowed functions are not directly callable.
@@ -521,13 +639,35 @@ export function registerFindTools(pi, deps, opts = {}) {
                 if (!concise && expand === "function" && pool !== null && typeof search.attachEnclosing === "function") {
                     await search.attachEnclosing(cwd, page);
                 }
-                const lines = concise ? page.map((m) => `${toDisplay(m.path)}:${m.line}`) : expand === "function" ? renderExpandedGrepRows(page) : page.flatMap((m) => renderGrepRows(m));
-                if (total > 0 && overBudget(lines.join("\n"), maxChars)) {
+                // Hashline file groups: per-match row blocks grouped by file and prefixed
+                // with `[path#TAG]` (whole-file tag, read once per file per call). The
+                // expand collapse state threads through page order first, so consecutive
+                // same-symbol headers collapse exactly as in the ungrouped rendering.
+                let blocks;
+                if (concise) {
+                    blocks = page.map((m) => ({ path: m.path, rows: [`${toDisplay(m.path)}:${m.line}`] }));
+                }
+                else if (expand === "function") {
+                    let last = "";
+                    blocks = page.map((m) => {
+                        const head = m.enclosing ? `in ${m.enclosing.kind} ${m.enclosing.name}` : "";
+                        const rows = [...(head !== "" && head !== last ? [head] : []), ...renderGrepRows(m)];
+                        last = head;
+                        return { path: m.path, rows };
+                    });
+                }
+                else {
+                    blocks = page.map((m) => ({ path: m.path, rows: renderGrepRows(m) }));
+                }
+                const ungrouped = blocks.flatMap((b) => b.rows);
+                if (total > 0 && overBudget(ungrouped.join("\n"), maxChars)) {
                     const byFile = new Map();
                     for (const m of matches)
                         byFile.set(toDisplay(m.path), (byFile.get(toDisplay(m.path)) ?? 0) + 1);
                     return withDetails(`Matched ${total} hits in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
                 }
+                const tags = await hashlineTagsFor(cwd, page.map((m) => m.path));
+                const lines = groupGrepBlocks(blocks, tags);
                 if (lines.length === 0) {
                     const backend = typeof res.backend === "string" ? res.backend : undefined;
                     return withDetails(backend !== undefined ? `0 matches for "${pattern}" (${backend})` : `0 matches for "${pattern}"`, { totalMatched: 0, totalFiles: 0, truncated: false });

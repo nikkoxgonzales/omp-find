@@ -37,4 +37,20 @@ export declare function sessionStatsText(): string;
 /** back to core. */
 export type FindToolsTier = "core" | "full";
 export declare function resolveFindToolsTier(explicit?: string): FindToolsTier;
+/** Standard xxHash32 over raw bytes. Stripe rounds use P2/rotl13/P1; the
+ * leftover 4-byte tail lane uses P3/rotl17/P4. NO lane-merge round after
+ * combining v1..v4 (that merge belongs to XXH64): h is rotl(v1,1)+
+ * rotl(v2,7)+rotl(v3,12)+rotl(v4,18), then len, tail, avalanche. Every
+ * multiply is Math.imul — plain `*` overflows float64 past 2^53 and
+ * silently mismatches. */
+export declare function xxh32Bytes(bytes: Uint8Array, seed?: number): number;
+/** 4-hex hashline content tag for whole-file text (path contributes zero
+ * bytes). Pipeline mirrors hashline_file_hash (pi-natives edit.rs) over
+ * store::file_hash (pi-edit store.rs): strip exactly one leading U+FEFF BOM,
+ * normalize CRLF and lone CR to LF, per line rstrip ' '/'\t'/'\r' while
+ * preserving LF structure (split_inclusive('\n') semantics), then xxh32
+ * low 16 bits as 4 uppercase hex chars. */
+export declare function hashlineFileHash(text: string): string;
+/** `[displayPath#TAG]` section header for a file's whole text. */
+export declare function hashlineHeader(displayPath: string, text: string): string;
 export declare function registerFindTools(pi: any, deps: FindToolsDeps, opts?: RegisterFindToolsOptions): void;

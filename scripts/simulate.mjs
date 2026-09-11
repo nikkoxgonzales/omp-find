@@ -200,6 +200,17 @@ await scenario('ffgrep literal phrase + bare-file filter (grep -c displacement)'
   assert(literal.includes('server.py'), `literal parens phrase did not match:\n${literal}`);
   return 'bare-file filter scoped 36 hits to server.py; parens matched literally';
 });
+await scenario('ffgrep hashline file headers ([path#TAG] per group)', async () => {
+  const out = await callTool('ffgrep', { pattern: 'CHT-1234', path: 'server.py', cwd: tree, limit: 5 });
+  show('ffgrep headers', out);
+  const m = /^\[src\/server\.py#([0-9A-F]{4})\]$/m.exec(out);
+  assert(m, `expected a [src/server.py#TAG] header line:\n${out}`);
+  const rows = out.split('\n');
+  const hi = rows.findIndex((l) => l.startsWith('[src/server.py#'));
+  const ri = rows.findIndex((l) => l.includes('src/server.py:') && !l.startsWith('['));
+  assert(hi >= 0 && ri > hi, `header must precede its file rows:\n${out}`);
+  return `file group carries [src/server.py#${m[1]}] ahead of its rows`;
+});
 
 await scenario('unknown-cursor errors (find + grep)', async () => {
   const badFind = await callTool('fffind', { cursor: 'find_c99999' });

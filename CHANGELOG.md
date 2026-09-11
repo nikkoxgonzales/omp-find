@@ -3,6 +3,12 @@
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
 
+## [0.8.0]
+
+### Added
+
+- `ffgrep` hashline file headers: each file group on the page is prefixed with `[path#TAG]` (whole-file content tag — BOM-strip, LF-normalize, per-line rstrip, xxh32 low 16 bits; byte-identical to the oh-my-pi `read` tag, so it copies straight into patch calls). Default-on output shaping only: no row removed or reordered, pagination/cursor/error formats untouched.
+
 ## [0.7.0]
 
 ### Added

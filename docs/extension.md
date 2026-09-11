@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.7.0). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.0). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -28,7 +28,10 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   **tools-side over the full result set**: unfiltered queries pass limit/offset to
   `grepContents`; filtered ones fetch all then filter + slice (188–194) — a bounded
   fetch first would drop hits outside the page (comment 186–187). Row format
-  `path:line:col: text` (195). Same cursor/error conventions as fffind.
+  `path:line:col: text` (195). Same cursor/error conventions as fffind. Page rows
+  group by file under `[path#TAG]` hashline headers (`hashlineFileHash` /
+  `hashlineHeader` next to `toDisplay`; whole-file tag read once per file per
+  call via `hashlineTagsFor`, backend-agnostic; unreadable files render bare).
 - **Output envelope** — every execute returns `{content, details:
   {totalMatched, totalFiles, truncated}}` (pi-fff packaging; totals over the full
   result set, `truncated` when a next page or count-fallback applies). Each def
