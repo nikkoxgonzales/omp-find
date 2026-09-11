@@ -254,7 +254,7 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 - `ffcapsule` considers the 30 most-mentioned files when hunting a definition.
 - Grep pages are path/line/col ordered on both backends; totals and counts are stable.
 - At most one rotating tip per call, max 3 per tool per process, on non-trivial results only.
-- Frecency writes serialize in-process; across processes each save re-reads the file and merges per key (max count, max last) — no lock, so simultaneous same-key bumps can still under-count.
+- Frecency writes serialize in-process; across processes each save takes a mkdir lockfile around read/merge/write and skips the write if the lock cannot be acquired, so simultaneous same-key bumps can still under-count.
 - Grep match sets hard-cap at 20000 (`GREP_CAP`) on both backends; a capped result renders totals as `N+` with a `capped` note.
 - `wholeWord` uses identifier-boundary semantics on both backends — `$` and `_` count as word chars, so patterns starting/ending with a non-word char may not match.
 - Regex (`literal:false`) `\p{...}` unicode property escapes work on both backends.

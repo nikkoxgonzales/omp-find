@@ -1,7 +1,6 @@
 # omp-find extension — as-built reference
 
-Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.11). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`, `README.md` (v0.8.12). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -53,9 +52,8 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   validation. Numeric params (`limit`/`depth`/`contextBefore`/`contextAfter`/
   `maxChars`) must be integers — `2.5` errors (`<param> must be an integer [>= 1]`)
   instead of flooring; `ffcallers` `depth` keeps its closed-set message
-  (`depth must be 1, 2, or 3`). Silent clamps that remain: `contextBefore`/
   `contextAfter` to 0–5, `expand` non-`function` → `none`, `ffoutline` `depth`
-  integer ≠ 1 → 0, `maxChars` at 1M.
+  must be 0 or 1; other integer values error`, `maxChars` at 1M.
 - **Override vs additive** (`tools.ts:94–95, 208–213`): `fffind`/`ffgrep` always
   registered; `override` (default) additionally claims `find`/`grep` with the same
   handlers. Dual-arity `register` shim (99–103): single-object if host takes 1 arg,
@@ -104,10 +102,10 @@ Persist is atomic (sidecar write + fsync, then copyFile over live — never
 rename-over-live on Windows, 45–58). `clear()` drops store + memory cache. Never
 throws (`recordOpen`/`score`/`clear` all swallow). Writes serialize through an
 in-process queue (parallel `recordOpen` calls no longer lose bumps); across
-processes each save re-reads the file and merges per key (max count, max last)
-instead of last-writer-wins — no lock, so simultaneous same-key bumps can
-still under-count. `clear()` also stamps a `clearedAt` tombstone in the store
-file; merge-on-save drops entries last-touched before the newest tombstone on
+  processes each save takes a mkdir lockfile around read/merge/write and
+  skips the write if the lock cannot be acquired, so simultaneous same-key bumps can
+  still under-count. `clear()` also stamps a `clearedAt` tombstone in the store
+  file; merge-on-save drops entries last-touched before the newest tombstone on
 both sides, so a stale in-memory cache can't resurrect cleared keys. Stores
 written before the tombstone existed (no `clearedAt`) load unchanged.
 

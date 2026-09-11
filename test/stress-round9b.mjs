@@ -74,7 +74,7 @@ describe('stress-round9b: numeric params reject non-integers instead of flooring
     const outline = textOf(await p.tools.get('ffoutline').execute('t', { path: 'a.ts', depth: 1.5 }));
     assert.match(outline, /ffoutline failed: depth must be an integer/, `ffoutline depth:1.5:\n${outline}`);
     const callers = textOf(await p.tools.get('ffcallers').execute('t', { symbol: 'x', depth: 1.5 }));
-    assert.match(callers, /ffcallers failed: depth must be 1, 2, or 3/, `ffcallers depth:1.5:\n${callers}`);
+    assert.match(callers, /ffcallers failed: depth must be an integer/, `ffcallers depth:1.5:\n${callers}`);
   });
 
   it('contextBefore/contextAfter: 2.5 error on ffgrep and ffstructural', async () => {

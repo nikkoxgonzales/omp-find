@@ -170,6 +170,8 @@ async function save(store, file, merge = false) {
     await fs.promises.mkdir(path.dirname(file), { recursive: true });
     const lockDir = `${file}.lock`;
     const locked = await acquireLock(lockDir);
+    if (!locked)
+        return;
     try {
         if (merge) {
             // Re-read under the lock: anything committed while we waited is folded in.

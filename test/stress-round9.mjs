@@ -145,7 +145,7 @@ describe('stress-round9: frecency cross-process lock', () => {
     });
   });
 
-  it('a live lock times out into an unlocked save — never throws', async () => {
+  it('a live lock times out into a skipped save — never throws', async () => {
     await isolated(async (dir) => {
       const target = join(dir, 'blocked.ts');
       await writeFile(target, 'x');
@@ -156,14 +156,14 @@ describe('stress-round9: frecency cross-process lock', () => {
       await frecency.recordOpen(target); // ~2s lock wait, then unlocked fallback
       const waited = Date.now() - t0;
       const entries = await storedEntries();
-      assert.ok(Object.keys(entries).some((k) => k.endsWith('blocked.ts')),
+      assert.ok(!Object.keys(entries).some((k) => k.endsWith('blocked.ts')),
         `unlocked fallback still persisted: ${JSON.stringify(entries)}`);
       assert.ok(waited >= 1500, `lock wait happened (${waited}ms)`);
       await rm(`${file}.lock`, { recursive: true, force: true });
     });
   });
 
-  it('a file at the lock path means no locking — save proceeds unlocked', async () => {
+  it('a file at the lock path means no locking — save gives up without writing', async () => {
     await isolated(async (dir) => {
       const target = join(dir, 'nolock.ts');
       await writeFile(target, 'x');
@@ -175,7 +175,7 @@ describe('stress-round9: frecency cross-process lock', () => {
       await frecency.recordOpen(target);
       assert.ok(Date.now() - t0 < 1500, 'giveup is instant, no 2s wait');
       const entries = await storedEntries();
-      assert.ok(Object.keys(entries).some((k) => k.endsWith('nolock.ts')),
+      assert.ok(!Object.keys(entries).some((k) => k.endsWith('nolock.ts')),
         `unlocked save persisted: ${JSON.stringify(entries)}`);
     });
   });

@@ -173,7 +173,7 @@ describe('stress-round7b: param validation', () => {
     const p = pi();
     for (const depth of [0, 4, 5, 2.5, '2']) {
       const out = textOf(await p.tools.get('ffcallers').execute('t', { symbol: 'x', depth }));
-      assert.match(out, /ffcallers failed: depth must be 1, 2, or 3/, `depth ${JSON.stringify(depth)}:\n${out}`);
+      assert.match(out, /ffcallers failed: depth must be (?:1, 2, or 3|an integer)/, `depth ${JSON.stringify(depth)}:\n${out}`);
     }
   });
 

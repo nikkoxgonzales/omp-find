@@ -2,6 +2,15 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.12]
+
+### Fixed
+
+- Frecency cross-process save now skips the write if the mkdir lock cannot be acquired, preventing concurrent save clobbering.
+- `ffoutline` `depth` validation no longer rejects cursor resumes with a different `depth`; it uses the stored depth and reports a drift note.
+- `ffcallers` `depth` validation no longer rejects cursor resumes; it uses the stored depth, reports drift, and requires an integer in {1,2,3} on fresh calls.
+- Documentation updated to reflect frecency locking and `ffoutline` depth semantics.
+
 ## [0.8.11]
 
 ### Fixed

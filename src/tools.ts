@@ -823,17 +823,9 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         let bound: Snapshot | undefined;
         let resumeNote: string | undefined;
         const cursorId = strParam(params, "cursor");
-        // depth is a 0|1 knob — a non-integer used to floor silently; reject it
-        // on both fresh calls and resumes (mirrors ffcallers' closed-set check).
+        // depth is a 0|1 knob — reject invalid values on fresh calls only;
+        // resume drift is reported as a note.
         const depthParam = params["depth"];
-        if (depthParam !== undefined) {
-          if (typeof depthParam !== "number" || !Number.isInteger(depthParam)) {
-            return text(`${toolName} failed: depth must be an integer`);
-          }
-          if (depthParam !== 0 && depthParam !== 1) {
-            return text(`${toolName} failed: depth must be 0 or 1`);
-          }
-        }
         if (cursorId) {
           const st = cursors.get(cursorId);
           if (!st || st.kind !== "outline") return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
@@ -849,6 +841,14 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           if (depthParam !== undefined && (depthParam === 1 ? 1 : 0) !== st.depth) diff.push("depth");
           resumeNote = cursorParamNote(diff);
         } else {
+          if (depthParam !== undefined) {
+            if (typeof depthParam !== "number" || !Number.isInteger(depthParam)) {
+              return text(`${toolName} failed: depth must be an integer`);
+            }
+            if (depthParam !== 0 && depthParam !== 1) {
+              return text(`${toolName} failed: depth must be 0 or 1`);
+            }
+          }
           const f = strictStrParam(params, "path");
           if (!f) return text(`${toolName} failed: provide a path`);
           file = f; dispForError = toDisplay(f);
@@ -921,12 +921,9 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         let bound: Snapshot | undefined;
         let resumeNote: string | undefined;
         const cursorId = strParam(params, "cursor");
-        // depth is a closed set — anything outside {1,2,3} used to clamp to 1
-        // silently; reject it on both fresh calls and resumes.
+        // depth is a closed set — reject invalid values on fresh calls only;
+        // resume drift is reported as a note.
         const depthParam = params["depth"];
-        if (depthParam !== undefined && depthParam !== 1 && depthParam !== 2 && depthParam !== 3) {
-          return text(`${toolName} failed: depth must be 1, 2, or 3`);
-        }
         if (cursorId) {
           const st = cursors.get(cursorId);
           if (!st || st.kind !== "callers") return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
@@ -948,6 +945,14 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           if (depthParam !== undefined && depthParam !== st.depth) diff.push("depth");
           resumeNote = cursorParamNote(diff);
         } else {
+          if (depthParam !== undefined) {
+            if (typeof depthParam !== "number" || !Number.isInteger(depthParam)) {
+              return text(`${toolName} failed: depth must be an integer`);
+            }
+            if (depthParam !== 1 && depthParam !== 2 && depthParam !== 3) {
+              return text(`${toolName} failed: depth must be 1, 2, or 3`);
+            }
+          }
           const s = strictStrParam(params, "symbol");
           if (!s) return text(`${toolName} failed: provide a symbol`);
           symbol = s;
