@@ -95,7 +95,7 @@ pi.registerTool({
 - `package.json`: `main`/`exports` → `./dist/extension.js`; `files: ["dist"]`;
   `omp` **and** `pi` keys each list `./dist/extension.js`; `engines: node >= 22`.
 - `.omp-plugin/marketplace.json`: wrapper (`name`/`owner`/`metadata`/`plugins[]`);
-  **version mirrors `package.json` in lockstep** (both 0.8.2 today).
+  **version mirrors `package.json` in lockstep** (both 0.8.3 today).
 - README must contain: one-line why, agent-visible tool cards (names, params,
   error/zero-state wording), query-syntax table, config precedence list, install +
   `/find-health` verify step, dev (`npm test`) + dist-committed note.

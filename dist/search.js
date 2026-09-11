@@ -545,6 +545,14 @@ export async function grepContents(pattern, opts = {}) {
                 backend = "walker";
             }
         }
+        // Deterministic page order on both backends: rg stdout order varies run to
+        // run, so cursor resume (re-fetch + re-slice) would dupe/skip rows. Sort by
+        // path, then line, then col on the forward-slash form rows render in, so
+        // win32 backslash ordering cannot wobble. Same shape as callersOf's sort.
+        matches.sort((a, b) => {
+            const ap = a.path.replace(/\\/g, "/"), bp = b.path.replace(/\\/g, "/");
+            return ap < bp ? -1 : ap > bp ? 1 : a.line - b.line || a.col - b.col;
+        });
         return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend };
     })();
     let timer;

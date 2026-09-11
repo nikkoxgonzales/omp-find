@@ -19,7 +19,7 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 - **`maxChars` budgets** — on every tool. Over-budget output degrades to counts/summaries instead of shell-pipe dumps: per-dir (find), per-file (grep/callers/structural), kind counts (outline), omitted-files footer (map), row shrinking (capsule).
 - **Query subset** — `dir/` prefix, `*.ext`-style globs, `!` exclusions, `git:modified`; leftover words fuzzy-match the path.
 - **Per-project JSON frecency** — every opened file bumps count + recency (7-day half-life decay); frequent/recent paths sort first. Stored under `%LOCALAPPDATA%/omp-find` (Windows) or `~/.omp/var/omp-find`, keyed by project-root hash.
-- **Cursor pagination** — default 30 results per page, max 50; fuller pages return an opaque `cursor` for the next page. Cursors bind to the fetched snapshot (result total + backend): resuming after the tree changes returns restart guidance (`results changed since page 1; re-run without cursor`), never a silently shifted page.
+- **Cursor pagination** — default 30 results per page, max 50; fuller pages return an opaque `cursor` for the next page. Cursors bind to the fetched snapshot (result total + backend): resuming after the tree changes returns restart guidance (`results changed since page 1; re-run without cursor`), never a silently shifted page. Grep pages are path/line/col ordered on both backends.
 - **Override vs additive** — `fffind` / `ffgrep` are always registered; override (default) additionally claims `find` / `grep`, additive leaves the host's names alone.
 - **No persistent index** — `/find-rescan` just drops the frecency store; the next search rebuilds from disk. Runaway-tree guard refuses filesystem-root and home-directory scans.
 
@@ -247,7 +247,7 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 - `node_modules` pruning is walker-only; rg follows your ignore files instead.
 - Cursors bind to result total + backend, so a compensating add+delete swap between pages reads as unchanged.
 - `ffcapsule` considers the 30 most-mentioned files when hunting a definition.
-- rg row order varies run to run; totals and counts are stable.
+- Grep pages are path/line/col ordered on both backends; totals and counts are stable.
 - At most one rotating tip per call, max 3 per tool per process, on non-trivial results only.
 - Frecency writes serialize in-process; across processes the store file is last-writer-wins.
 

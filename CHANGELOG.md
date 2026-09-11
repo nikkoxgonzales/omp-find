@@ -2,6 +2,11 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.3]
+
+### Fixed
+
+- Grep matches sort deterministically by path/line/col before paging on both backends (rg stdout order varies run-to-run; cursor page 2+ re-fetch could duplicate/skip rows despite the total+backend snapshot guard).
 
 ## [0.8.2]
 

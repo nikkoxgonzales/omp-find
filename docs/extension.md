@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.2). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.3). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -34,7 +34,7 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   `rgGrep`/`fallbackGrep`/`listFiles`: rg gets the pin as its positional path, the
   walker seeds traversal at the pin), so explicitly-pinned hidden/ignored files hit
   on both backends; glob and bare-basename forms keep the post-filter only. Row format
-  `path:line:col: text` (195); rg row order varies run to run, totals are stable.
+  `path:line:col: text` (195); grep pages are path/line/col ordered on both backends, totals are stable.
   Same cursor/error conventions as fffind. Page rows
   group by file under `[path#TAG]` hashline headers (`hashlineFileHash` /
   `hashlineHeader` next to `toDisplay`; whole-file tag read once per file per
@@ -95,7 +95,7 @@ Default 30, max 50, enforced in two places: `numParam` clamps tool params
 200-entry cap with oldest eviction) capturing full query state (query/limit/offset/cwd;
 pattern/literal/ignoreCase/pathFilter/…). Footer when more remain:
 `... (N more; pass cursor "…" for the next page)` (`tools.ts:139–142, 196–201`).
-Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap between pages is invisible to resume.
+Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap between pages is invisible to resume. Grep pages are path/line/col ordered on both backends.
 
 ## Scan backends
 
