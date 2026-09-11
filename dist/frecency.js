@@ -4,7 +4,10 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 const HALF_LIFE_MS = 7 * 24 * 3600 * 1000;
-function fresh() { return { entries: {} }; }
+// Null-prototype entries map: `store.entries["__proto__"] = {...}` on a plain
+// object invokes the proto setter and silently drops the key — a path literally
+// named `__proto__` would never persist or score.
+function fresh() { return { entries: Object.create(null) }; }
 let cache = null;
 let cacheFile = null;
 function projectHash(root) {
@@ -28,7 +31,7 @@ async function readDisk(file) {
     try {
         const raw = await fs.promises.readFile(file, "utf8");
         const parsed = JSON.parse(raw);
-        const entries = {};
+        const entries = Object.create(null);
         if (parsed && typeof parsed.entries === "object" && parsed.entries !== null) {
             // Sanitize persisted entries: a hand-edited/corrupt store can carry
             // wrong-typed count/last (e.g. strings) that would turn score() into NaN

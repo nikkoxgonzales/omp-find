@@ -98,8 +98,12 @@ function defPattern(name: string): string {
   // Edge-conditional boundary: \b when the name ends in a word char (rg-compatible);
   // a [\w$] lookaround otherwise — $ is an identifier char, so `foo` must not
   // match `foo$bar` and `foo$` must still resolve (walker serves those patterns).
+  // The edge test reads the ESCAPED char against \w (not [\w$]): escaping only
+  // prefixes non-word chars, so esc's last char is \w iff the raw name's is —
+  // a [\w$] test would misread a trailing `\$` as a word edge and emit a \b
+  // that can never match (`foo$ ` has no word/non-word transition).
   const esc = escapeRegExp(name);
-  const right = /[\w$]$/.test(esc) ? "\\b" : "(?![\\w$])";
+  const right = /\w$/.test(esc) ? "\\b" : "(?![\\w$])";
   return `^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+|abstract\\s+)*(?:function|def|fn|func|class|struct|enum|interface|trait|type|const|let|var)\\s+${esc}${right}`;
 }
 
@@ -139,7 +143,7 @@ export function compileStructural(pattern: string, opts: { language?: string } =
     }
     if (tag === "kind") {
       if (!rest || /\s/.test(rest)) throw new Error(`kind: takes one bare kind (supported: ${Object.keys(KIND_PATTERNS).join(", ")}) — combine with a name via inside: or a $VAR pattern`);
-      const base = KIND_PATTERNS[rest];
+      const base = Object.hasOwn(KIND_PATTERNS, rest) ? KIND_PATTERNS[rest] : undefined;
       if (!base) throw new Error(`unknown structural kind "${rest}" (supported: ${Object.keys(KIND_PATTERNS).join(", ")})`);
       return { source: raw, regex: base, groups, language, mode: "kind", hasBackref: false, description: `structural kind:${rest} [${language}] → line-shape regex (approximate, not AST)` };
     }

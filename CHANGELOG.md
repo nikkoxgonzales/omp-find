@@ -2,6 +2,22 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.6]
+
+### Fixed
+
+- Outline no longer drops methods named `constructor`/`toString`/etc. — `NOT_A_METHOD` lookup was a plain-object prototype leak; now `Object.hasOwn`.
+- `kind:` rejects Object.prototype member names (`kind:__proto__` produced a match-everything regex; `kind:constructor` crashed the worker clone) — now clean `unknown structural kind` errors.
+- Capped rg result sets are now deterministic: rg collects full stdout, sorts, then applies GREP_CAP — cursor chains over capped sets no longer dupe/skip rows. Capped results no longer mint cursors (footer hints to narrow the query).
+- rg stdout >64MB (maxBuffer) and oversized argv (ENAMETOOLONG/E2BIG) now fall back to the walker instead of throwing.
+- `ffcallers` no longer reports `foo` call/import sites inside `$foo`/`foo$bar` (post-filter on identifier boundaries); `$foo` sites now tag `[exact]` correctly.
+- rg byte columns convert to character columns — multibyte lines now agree with the walker.
+- `\p{...}` patterns containing identity escapes retry without the `u` flag instead of erroring on the walker.
+- Leading `(?i)` inline flag maps to `ignoreCase` (rg accepts it; JS preflight rejected it).
+- `fffind` file pins (`path: 'sub/file.ts'`) no longer join the pin into the fuzzy query — file pin + empty pattern lists the file.
+- `path`/`scope` values escaping the scan root (`../x`, absolute) now error instead of silently widening to a full-tree scan.
+- Frecency `entries` uses null-prototype objects — a `__proto__` key now persists.
+
 ## [0.8.5]
 
 ### Fixed

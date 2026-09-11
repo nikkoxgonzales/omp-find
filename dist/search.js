@@ -119,13 +119,20 @@ async function assertCwdExists(cwd) {
         throw new Error(`scan root not found: ${cwd}`);
     }
 }
-/** rg missing (ENOENT) or rg per-file runtime failure (numeric exit, e.g. exit 2
- * from one unscannable file — trailing-dot name, EACCES, broken symlink, FIFO —
- * with --no-messages hiding which file) → walker fallback. Timeout rejections
+/** rg spawn/runtime failures that downgrade to the walker: rg missing (ENOENT),
+ * argv too long for the OS (ENAMETOOLONG/E2BIG — 64KB+ patterns), stdout over
+ * the 64MB maxBuffer (ERR_CHILD_PROCESS_STDIO_MAXBUFFER/ENOBUFS, or the bare
+ * "maxBuffer" message on platforms that report no code), or a numeric exit
+ * (e.g. exit 2 from one unscannable file — trailing-dot name, EACCES, broken
+ * symlink, FIFO — with --no-messages hiding which file). Timeout rejections
  * carry no code and rethrow; rg exit 1 (no matches) never rejects. */
 function rgRecoverable(err) {
     const c = errCode(err);
-    return c === "ENOENT" || typeof c === "number";
+    if (c === "ENOENT" || c === "ENAMETOOLONG" || c === "E2BIG" || c === "ENOBUFS" || c === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+        return true;
+    if (typeof c === "number")
+        return true;
+    return err instanceof Error && /maxBuffer/i.test(err.message);
 }
 /** Cooperative deadline: the timeout race already rejected, so stop burning CPU
 after the budget (rg is kill-guarded; the walker is not). Throws timeout text. */
@@ -370,6 +377,28 @@ export async function findPaths(query, opts = {}) {
     const scan = await findScanned(query, opts);
     return pageOf(scan.paths, opts.limit, opts.offset);
 }
+/** rg --vimgrep columns are BYTE offsets into the raw line; walker columns are
+ * UTF-16 code units. Convert via the byte prefix of the decoded text. Fast
+ * path: an all-ASCII prefix keeps byte col == char col. `text` is the raw
+ * (untrimmed, un-sliced) row text; a byte col past its end (e.g. rg's
+ * "[Omitted long matching line]" placeholder) passes through unchanged. */
+function byteColToCharCol(text, byteCol) {
+    const n = byteCol - 1;
+    if (n <= 0)
+        return byteCol;
+    const prefix = text.slice(0, n);
+    let ascii = prefix.length === n;
+    if (ascii)
+        for (let i = 0; i < prefix.length; i++) {
+            if (prefix.charCodeAt(i) > 0x7f) {
+                ascii = false;
+                break;
+            }
+        }
+    if (ascii)
+        return byteCol;
+    return Buffer.from(text, "utf8").subarray(0, n).toString("utf8").length + 1;
+}
 async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord = false, scope) {
     const args = ["--vimgrep", "--no-heading", "--no-messages", "--max-columns", "500", "--max-filesize", MAX_GREP_SIZE, follow ? "--follow" : "--no-follow"];
     if (literal)
@@ -381,6 +410,11 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, whol
     const root = normalizeScope(scope);
     args.push("--", pattern, root === undefined ? "." : toNative(root));
     const out = [];
+    // Collect ALL rows — no early cap. rg's parallel emit order varies run to
+    // run, so slicing the first GREP_CAP rows here would hand grepContents a
+    // nondeterministic subset to sort (cursor resume would dupe/skip). The cap
+    // is applied post-sort in grepContents; stdout is already bounded by the
+    // 64MB maxBuffer, which is recoverable to the walker.
     for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split(/\r?\n/)) {
         if (!line)
             continue;
@@ -388,9 +422,7 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, whol
         // \r is stripped from the emitted text for walker parity.
         const m = /^([^\n]*?):(\d+):(\d+):([^\n]*)$/.exec(line);
         if (m)
-            out.push({ path: toNative(stripDotSlash(m[1].replace(/\\/g, "/"))), line: Number(m[2]), col: Number(m[3]), text: m[4].replace(/\r/g, "").trim().slice(0, 500) });
-        if (out.length >= GREP_CAP)
-            break; // same hard cap as the walker backend
+            out.push({ path: toNative(stripDotSlash(m[1].replace(/\\/g, "/"))), line: Number(m[2]), col: byteColToCharCol(m[4], Number(m[3])), text: m[4].replace(/\r/g, "").trim().slice(0, 500) });
     }
     return out;
 }
@@ -406,13 +438,26 @@ export async function walkerRegexGrep(cwd, pattern, literal, ignoreCase, follow,
     // escapes silently go dead.
     const src = literal ? escapeRegExp(pattern) : pattern;
     const wrapped = wholeWord ? wordWrap(src) : src;
-    const flags = (ignoreCase ? "gi" : "g") + (/\\[pu]\{/.test(src) ? "u" : "");
+    const wantsU = /\\[pu]\{/.test(src);
+    const flags = (ignoreCase ? "gi" : "g") + (wantsU ? "u" : "");
     let re;
     try {
         re = new RegExp(wrapped, flags);
     }
-    catch {
-        throw new Error(`invalid regex: ${pattern}`);
+    catch (err) {
+        // u-flag SyntaxError (e.g. `\p{Lu}\ ` — identity escapes are illegal under
+        // u): retry without u. The pattern still runs; \p{…} degrades to a literal
+        // class, matching rg's acceptance of the same source.
+        if (wantsU && err instanceof SyntaxError) {
+            try {
+                re = new RegExp(wrapped, ignoreCase ? "gi" : "g");
+            }
+            catch {
+                throw new Error(`invalid regex: ${pattern}`);
+            }
+        }
+        else
+            throw new Error(`invalid regex: ${pattern}`);
     }
     const out = [];
     for (const f of await walkFiles(cwd, follow, deadline, timeoutMs, scope)) {
@@ -599,9 +644,18 @@ export async function grepContents(pattern, opts = {}) {
     if (!pattern)
         throw new Error("grep pattern must not be empty");
     const literal = opts.literal ?? true;
+    // rg accepts a leading (?i) inline flag; JS RegExp doesn't. Translate it to
+    // ignoreCase and strip it before the JS preflight — only at position 0, so
+    // mid-pattern inline flags keep erroring like before.
+    let pat = pattern;
+    let inlineIgnoreCase = false;
+    if (!literal && pat.startsWith("(?i)")) {
+        pat = pat.slice(4);
+        inlineIgnoreCase = true;
+    }
     if (!literal) {
         try {
-            new RegExp(pattern);
+            new RegExp(pat);
         }
         catch {
             throw new Error(`invalid regex: ${pattern}`);
@@ -610,8 +664,9 @@ export async function grepContents(pattern, opts = {}) {
     const follow = opts.followSymlinks ?? false;
     // smartCase is opt-in and wins when enabled: lowercase patterns match
     // case-insensitively, any uppercase letter restores sensitivity. ignoreCase
-    // keeps working exactly as before when smartCase is off.
-    const ignoreCase = opts.smartCase === true ? !/[A-Z]/.test(pattern) : (opts.ignoreCase ?? false);
+    // keeps working exactly as before when smartCase is off; a leading (?i)
+    // inline flag forces insensitive matching on top of either.
+    const ignoreCase = inlineIgnoreCase || (opts.smartCase === true ? !/[A-Z]/.test(pat) : (opts.ignoreCase ?? false));
     const wholeWord = opts.wholeWord ?? false;
     const timeoutMs = opts.timeoutMs ?? GREP_TIMEOUT_DEFAULT;
     const deadline = Date.now() + timeoutMs; // cooperative abort for the walker path
@@ -619,18 +674,18 @@ export async function grepContents(pattern, opts = {}) {
         let matches;
         let backend;
         if (opts.scan === "mock") {
-            matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord, opts.scope);
+            matches = await fallbackGrep(cwd, pat, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord, opts.scope);
             backend = "walker";
         }
         else {
             try {
-                matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord, opts.scope);
+                matches = await rgGrep(cwd, pat, literal, ignoreCase, follow, timeoutMs, wholeWord, opts.scope);
                 backend = "rg";
             }
             catch (err) {
                 if (!rgRecoverable(err))
                     throw err;
-                matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord, opts.scope);
+                matches = await fallbackGrep(cwd, pat, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord, opts.scope);
                 backend = "walker";
             }
         }
@@ -642,6 +697,12 @@ export async function grepContents(pattern, opts = {}) {
             const ap = a.path.replace(/\\/g, "/"), bp = b.path.replace(/\\/g, "/");
             return ap < bp ? -1 : ap > bp ? 1 : a.line - b.line || a.col - b.col;
         });
+        // The hard cap lands AFTER the sort: rgGrep collects its full stdout (the
+        // parallel emit order is nondeterministic, so capping pre-sort would make
+        // the kept subset — and every cursor chain over it — unstable). The walker
+        // already capped during collection; this slice is a no-op for it.
+        if (matches.length > GREP_CAP)
+            matches = matches.slice(0, GREP_CAP);
         return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend, capped: matches.length >= GREP_CAP || undefined };
     })();
     let timer;
@@ -666,18 +727,24 @@ function escapeRegExp(s) {
  * so `$foo` resolves and `foo` never matches inside `$foo`/`foo$bar`. Edges are
  * conditional: a word-char edge stays `\b` (rg-compatible); a non-word edge uses
  * a `[\w$]` lookaround — rg rejects look-arounds, so those patterns recover to
- * the walker, which is still correct (previously they silently matched nothing). */
+ * the walker, which is still correct (previously they silently matched nothing).
+ * The edge test reads the ESCAPED char against `\w` (not `[\w$]`): escaping only
+ * prefixes non-word chars, so esc's edge char is `\w` iff the raw symbol's is.
+ * Testing `[\w$]` would misread a `\$` edge as a word edge and emit a `\b` that
+ * can never match (`foo$ ` has no word/non-word transition). */
 function symBound(esc) {
-    const l = /^[\w$]/.test(esc) ? "\\b" : "(?<![\\w$])";
-    const r = /[\w$]$/.test(esc) ? "\\b" : "(?![\\w$])";
+    const l = /^\w/.test(esc) ? "\\b" : "(?<![\\w$])";
+    const r = /\w$/.test(esc) ? "\\b" : "(?![\\w$])";
     return `${l}${esc}${r}`;
 }
 /** rg -w parity for punctuation-edged patterns: `\b` only at edges that begin or
  * end with a word char; non-word edges use `[\w$]` lookarounds instead (a bare
- * `\b` wrap fails `cat.`/`.cat` — no boundary between two non-word chars). */
+ * `\b` wrap fails `cat.`/`.cat` — no boundary between two non-word chars). The
+ * edge test is `\w` on the raw source char: a literal `\$`/`$` edge must take
+ * the lookaround branch, not a `\b` that can never match. */
 function wordWrap(src) {
-    const l = /^[\w$]/.test(src) ? "\\b" : "(?<![\\w$])";
-    const r = /[\w$]$/.test(src) ? "\\b" : "(?![\\w$])";
+    const l = /^\w/.test(src) ? "\\b" : "(?<![\\w$])";
+    const r = /\w$/.test(src) ? "\\b" : "(?![\\w$])";
     return `${l}(?:${src})${r}`;
 }
 /** File text → lines without the phantom element `split("\n")` leaves after a
@@ -694,15 +761,28 @@ symbol, definition lines filtered, merged/deduped into `seen` (visited
 async function directCallers(sym, base, seen, ring) {
     const esc = escapeRegExp(sym);
     const bound = symBound(esc); // $foo resolves: $ counts as an identifier char here
-    const rightEdge = /[\w$]$/.test(esc) ? "\\b" : "(?![\\w$])";
+    const rightEdge = /\w$/.test(esc) ? "\\b" : "(?![\\w$])";
     const patterns = [`${bound}\\s*\\(`, `(?:import|from|require|use|include)\\b[^\\n]*${bound}`, `\\.${esc}${rightEdge}`];
     const defRe = new RegExp(`^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+)*(?:function|def|fn|func|class)\\b[^\\n]*${bound}`);
+    // rg's \b only sees \w, so `\bfoo\b\s*\(` matches inside `$foo(`/`foo$bar(` —
+    // and the rg patterns can't use lookarounds (rg rejects them → walker for
+    // every callers call). Post-filter instead: a row only survives when the
+    // trimmed line text shows a real identifier-boundary call or import site.
+    // Member-access rows (`\.esc`) need no left-edge check — the literal dot is
+    // never an identifier char.
+    const flags = base.ignoreCase ? "i" : "";
+    const verifyCall = new RegExp(`(?<![\\w$])${esc}(?![\\w$])\\s*\\(`, flags);
+    const verifyImport = new RegExp(`(?:import|from|require|use|include)\\b[^\\n]*(?<![\\w$])${esc}(?![\\w$])`, flags);
+    const verify = [verifyCall, verifyImport, null];
     let backend = "rg";
     const fresh = [];
-    for (const p of patterns) {
-        const r = await grepContents(p, { ...base, literal: false });
+    for (let pi = 0; pi < patterns.length; pi++) {
+        const r = await grepContents(patterns[pi], { ...base, literal: false });
         backend = r.backend;
+        const v = verify[pi];
         for (const m of r.matches) {
+            if (v !== null && !v.test(m.text))
+                continue;
             if (defRe.test(m.text))
                 continue;
             const key = `${m.path}:${m.line}`;

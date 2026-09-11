@@ -130,7 +130,8 @@ describe('stress-round4b: GREP_CAP capped flag', () => {
     const first = await ffgrep.execute('t', { pattern: 'x' });
     const out = textOf(first);
     assert.match(out, /\(20000\+ matches total, capped\)/, `totals line:\n${out}`);
-    assert.match(out, /\(19999\+ more; pass cursor "[^"]+" for the next page\)/, `cursor footer:\n${out}`);
+    assert.match(out, /\(19999\+ more; capped result set — narrow the query for full results\)/, `capped footer:\n${out}`);
+    assert.doesNotMatch(out, /pass cursor/, 'capped result mints no cursor');
     assert.equal(first.details.capped, true, 'details carry the capped flag');
 
     const tight = textOf(await ffgrep.execute('t', { pattern: 'x', maxChars: 1 }));

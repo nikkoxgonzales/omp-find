@@ -261,6 +261,15 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 - `contextBefore`/`contextAfter` windows render per match — overlapping context repeats per match instead of merging like `rg -C`.
 - The walker skips `.git` pointer files (worktree/submodule `.git` files) as well as `.git` directories.
 - `git:modified` needs a work tree: bare repositories fail `git status` like non-repos, and the error names the requirement.
+- Capped grep-family result sets (`N+`, `capped`) mint no next-page cursor — pages beyond the cap don't exist; narrow the query for full results.
+- The cursor store is FIFO-200 with no TTL — "expired" means evicted, not aged out.
+- The walker stops at `MAX_DEPTH=25` while rg is unbounded; a pinned `path` still reaches deeper dirs on the walker (the pin roots traversal at depth 0).
+- An `fffind` `path` that resolves to a file is consumed by the pin — the pin text isn't also fuzzy-matched (pin + empty pattern lists the file; pin + pattern matches within the filename).
+- A `path` that escapes the scan root (`../x`, absolute paths) errors instead of silently scanning the full tree.
+- `ffoutline` `path` resolves under `cwd` but isn't confined to it — `../x` and absolute paths read outside the scan root.
+- `wholeWord` boundaries are JS-identifier `[\w$]` on both backends — differs from `rg -w` at `$` and unicode edges.
+- rg match columns are character-based (byte offsets converted post-0.8.6); walker cols are already char-based.
+- A leading `(?i)` in a `literal:false` pattern maps to `ignoreCase`.
 
 ## Config
 

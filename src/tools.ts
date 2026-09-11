@@ -129,8 +129,14 @@ function staleCursor(toolName: string): { content: Array<{ type: string; text: s
 function callerCertainty(symbol: string, rowText: string, ignoreCase: boolean): "exact" | "possible" {
   const flags = ignoreCase ? "i" : "";
   const esc = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  if (new RegExp(`\\b${esc}\\s*\\(`, flags).test(rowText)) return "exact";
-  if (new RegExp(`(?:import|from|require|use|include)\\b[^\n]*\\b${esc}\\b`, flags).test(rowText)) return "exact";
+  // Identifier-aware edges like symBound: `\b` only at true `\w` edges — `$` is
+  // an identifier char but not a `\b` word char, so `\b\$foo` never matches;
+  // non-`\w` edges get a `[\w$]` lookaround instead.
+  const l = /^\w/.test(esc) ? "\\b" : "(?<![\\w$])";
+  const r = /\w$/.test(esc) ? "\\b" : "(?![\\w$])";
+  const bound = `${l}${esc}${r}`;
+  if (new RegExp(`${bound}\\s*\\(`, flags).test(rowText)) return "exact";
+  if (new RegExp(`(?:import|from|require|use|include)\\b[^\n]*${bound}`, flags).test(rowText)) return "exact";
   return "possible";
 }
 /** Tag possible caller rows; the match row renders first, context rows stay indented.
@@ -343,7 +349,12 @@ function scopePin(filter: string | undefined): string | undefined {
   if (!f.includes("/")) return undefined;
   if (/[*?[{]/.test(f)) return undefined;
   const segs = f.split("/").filter(Boolean);
-  if (segs.length === 0 || segs.includes("..")) return undefined;
+  // Pin-shaped but unusable scopes used to fall through to undefined, which the
+  // core reads as "no scope" — a silent full-tree scan. Surface them instead:
+  // `..` segments and absolute paths (`/x`, `C:/x`) escape the scan root.
+  if (segs.length === 0 || segs.includes("..") || /^[A-Za-z]:$/.test(segs[0]) || f.startsWith("/")) {
+    throw new Error(`path escapes the scan root: ${filter}`);
+  }
   return segs.join("/");
 }
 function ctxParam(params: Record<string, unknown>, key: string): number {
@@ -485,12 +496,21 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         } else {
           const pattern = strParam(params, "pattern") ?? "";
           const dirParam = strParam(params, "path");
-          query = [dirParam, pattern].filter(Boolean).join(" ");
-          if (!query) return text(`${toolName} failed: provide a pattern or path`);
           limit = numParam(params, "limit") ?? FIND_PAGE;
           offset = 0;
           cwd = cwdParam(params);
           scope = scopePin(dirParam);
+          // A `path` that resolves to a file is consumed entirely by the scope
+          // pin — feeding it into the fuzzy query too double-counts it and
+          // zeroes the result (the pin text can't subsequence-match its own
+          // basename). File pin + empty pattern lists the file; file pin +
+          // pattern fuzzy-matches within that file's name.
+          let filePin = false;
+          if (scope !== undefined) {
+            try { filePin = fs.statSync(path.join(path.resolve(cwd ?? process.cwd()), ...scope.split("/"))).isFile(); } catch { filePin = false; }
+          }
+          query = filePin ? pattern : [dirParam, pattern].filter(Boolean).join(" ");
+          if (!query && !filePin) return text(`${toolName} failed: provide a pattern or path`);
           maxChars = charsParam(params, "maxChars"); concise = params["concise"] === true;
           let fetched = await runFind(search, query, scope === undefined ? { cwd, limit: PAGE_MAX, offset: 0 } : { cwd, limit: PAGE_MAX, offset: 0, scope });
           scanned = fetched.scanned; backend = fetched.backend;
@@ -498,7 +518,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           if (fetched.paths.length === 0 && words.length >= 3) {
             // One auto-retry with the first 2 terms (fff find_files behavior); the
             // directory constraint is preserved, only the fuzzy tail is shortened.
-            const shorter = [dirParam, words.slice(0, 2).join(" ")].filter(Boolean).join(" ");
+            const shorter = [filePin ? undefined : dirParam, words.slice(0, 2).join(" ")].filter(Boolean).join(" ");
             fetched = await runFind(search, shorter, scope === undefined ? { cwd, limit: PAGE_MAX, offset: 0 } : { cwd, limit: PAGE_MAX, offset: 0, scope });
             scanned = fetched.scanned ?? scanned; backend = fetched.backend ?? backend;
             relaxed = { from: query, to: shorter };
@@ -682,12 +702,18 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const hasMore = offset + page.length < total;
         const details = { totalMatched: total, totalFiles: new Set(matches.map((m) => m.path)).size, truncated: hasMore, ...(capped ? { capped: true } : {}) };
         if (hasMore) {
-          const next = storeCursor(scope === undefined ? {
-            kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
-          } : {
-            kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, scope, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
-          });
-          lines.push("", `... (${total - offset - page.length}${capped ? "+" : ""} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+          if (capped) {
+            // Pages beyond the cap don't exist — minting a cursor would promise
+            // them. The `N+`/`capped` totals above already flag the bound.
+            lines.push("", `... (${total - offset - page.length}+ more; capped result set — narrow the query for full results)`);
+          } else {
+            const next = storeCursor(scope === undefined ? {
+              kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
+            } : {
+              kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, scope, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
+            });
+            lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+          }
         }
         return withDetails(lines.join("\n"), details);
       } catch (err) {
@@ -851,8 +877,14 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const hasMore = offset + page.length < total;
         const details = { totalMatched: total, totalFiles: new Set(certain.map((m) => m.path)).size, truncated: hasMore, ...(capped ? { capped: true } : {}) };
         if (hasMore) {
-          const next = storeCursor({ kind: "callers", symbol, ignoreCase, pathFilter, exactOnly, depth, limit, nextOffset: offset + page.length, cwd, maxChars, total, backend: liveBackend });
-          lines.push("", `... (${total - offset - page.length}${capped ? "+" : ""} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+          if (capped) {
+            // Pages beyond the cap don't exist — minting a cursor would promise
+            // them. The `N+`/`capped` totals above already flag the bound.
+            lines.push("", `... (${total - offset - page.length}+ more; capped result set — narrow the query for full results)`);
+          } else {
+            const next = storeCursor({ kind: "callers", symbol, ignoreCase, pathFilter, exactOnly, depth, limit, nextOffset: offset + page.length, cwd, maxChars, total, backend: liveBackend });
+            lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+          }
         }
         return withDetails(lines.length > 0 ? lines.join("\n") : `No approximate references to ${symbol} found`, details);
       } catch (err) {
@@ -961,8 +993,14 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const hasMore = offset + page.length < total;
         const details = { totalMatched: total, totalFiles: new Set(filtered.map((m) => m.path)).size, truncated: hasMore, ...(capped ? { capped: true } : {}) };
         if (hasMore) {
-          const next = storeCursor({ kind: "structural", query, language, ignoreCase, pathFilter, rewrite, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, maxChars, total, backend: liveBackend });
-          lines.push("", `... (${total - offset - page.length}${capped ? "+" : ""} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+          if (capped) {
+            // Pages beyond the cap don't exist — minting a cursor would promise
+            // them. The `N+`/`capped` totals above already flag the bound.
+            lines.push("", `... (${total - offset - page.length}+ more; capped result set — narrow the query for full results)`);
+          } else {
+            const next = storeCursor({ kind: "structural", query, language, ignoreCase, pathFilter, rewrite, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, maxChars, total, backend: liveBackend });
+            lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+          }
         }
         return withDetails(lines.join("\n"), details);
       } catch (err) {

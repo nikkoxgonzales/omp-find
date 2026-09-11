@@ -9,7 +9,10 @@ const HALF_LIFE_MS = 7 * 24 * 3600 * 1000;
 interface Entry { count: number; last: number }
 interface Store { entries: Record<string, Entry> }
 
-function fresh(): Store { return { entries: {} }; }
+// Null-prototype entries map: `store.entries["__proto__"] = {...}` on a plain
+// object invokes the proto setter and silently drops the key — a path literally
+// named `__proto__` would never persist or score.
+function fresh(): Store { return { entries: Object.create(null) as Record<string, Entry> }; }
 let cache: Store | null = null;
 let cacheFile: string | null = null;
 
@@ -37,7 +40,7 @@ async function readDisk(file: string): Promise<Store> {
   try {
     const raw = await fs.promises.readFile(file, "utf8");
     const parsed = JSON.parse(raw) as Partial<Store>;
-    const entries: Record<string, Entry> = {};
+    const entries: Record<string, Entry> = Object.create(null) as Record<string, Entry>;
     if (parsed && typeof parsed.entries === "object" && parsed.entries !== null) {
       // Sanitize persisted entries: a hand-edited/corrupt store can carry
       // wrong-typed count/last (e.g. strings) that would turn score() into NaN

@@ -46,7 +46,9 @@ const CPP = [
 const GENERIC = [
     { re: new RegExp(`^(class|function|def|fn|func|interface|enum|struct|type)\\s+(${WORD})`), kind: "", nameIdx: 2 },
 ];
-/** Method-name blocklist: control-flow/calls that mimic a signature. */
+/** Method-name blocklist: control-flow/calls that mimic a signature. Own-
+ * property test only — `constructor`, `toString` & friends are real method
+ * names that must not be dropped via Object.prototype leakage. */
 const NOT_A_METHOD = { if: true, for: true, while: true, switch: true, catch: true, return: true, new: true, super: true, this: true, typeof: true, sizeof: true, assert: true, print: true, println: true };
 /** Comment-only line openers (checked on the trimmed line). */
 function isComment(line) {
@@ -132,7 +134,7 @@ export async function outlineFile(file, opts = {}) {
             if (!m)
                 continue;
             const name = m[rule.nameIdx];
-            if (!name || NOT_A_METHOD[name])
+            if (!name || Object.hasOwn(NOT_A_METHOD, name))
                 break;
             const kind = rule.kind || m[1];
             const col = line.indexOf(name) + 1;

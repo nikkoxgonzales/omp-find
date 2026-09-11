@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.5). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.6). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -98,6 +98,10 @@ Default 30, max 50, enforced in two places: `numParam` clamps tool params
 pattern/literal/ignoreCase/pathFilter/…). Footer when more remain:
 `... (N more; pass cursor "…" for the next page)` (`tools.ts:139–142, 196–201`).
 Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap or a rename/content-preserving mutation between pages is invisible to resume. Resume is a stateless re-fetch — resuming the same cursor twice returns the same rows and mints a fresh cursor id each time. Grep pages are path/line/col ordered on both backends.
+Capped grep-family results (`capped: true`, `N+` totals) mint no cursor — pages
+beyond `GREP_CAP` don't exist; the footer instead says `capped result set —
+narrow the query for full results`. The store is FIFO-200 with no TTL:
+"expired" means evicted, not aged out.
 
 ## Scan backends
 
@@ -114,6 +118,15 @@ Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contrac
   `.git`, dot-dirs (`.git` pointer files — worktree/submodule `.git` files —
   skipped too); returns forward-slash relative paths. rg `./` prefixes stripped
   (96, 149).
+  `MAX_DEPTH=25` bounds unpinned walks only — a pinned `path` roots traversal
+  at depth 0, so pinned deep dirs stay reachable on the walker where rg is
+  unbounded. A pin that escapes the scan root (`../x`, absolute paths) errors
+  (`path escapes the scan root: …`) instead of silently scanning the full
+  tree. An `fffind` `path` resolving to a file is consumed by the pin — the
+  pin text isn't also fuzzy-matched (pin + empty pattern lists the file; pin
+  + pattern matches within the filename). `ffoutline` `path` resolves under
+  `cwd` but isn't confined to it — `../x` and absolute paths read outside the
+  scan root.
 - **Grep** (`rgGrep` 169–181): `rg --vimgrep --no-heading --no-messages --max-columns
   500 --max-filesize 2M`, `--fixed-strings` when literal, `--ignore-case` optional;
   rows parsed `path:line:col:text`, text trimmed to 500 chars. `--max-columns 500`
@@ -126,11 +139,13 @@ Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contrac
   compilability up front, rg→fallback on ENOENT, plus a `Promise.race` wall-clock
   timeout (default 30 s, `timeoutMs` overridable — a core `GrepOptions` knob, not
   a tool param) that rejects `grep timed out after Ns`
-  even if rg hangs past its own `timeout` kill (`runCmd` 48–59 treats rg exit 1 as
-  no-matches, kill as timeout). `wholeWord` wraps patterns in identifier
-  boundaries on both backends (`$`/`_` count as word chars, so patterns
-  starting/ending with a non-word char may not match); `\p{...}` unicode
-  property escapes work on the walker too, not just rg.
+  no-matches, kill as timeout). `wholeWord` wraps patterns in JS-identifier
+  `[\w$]` boundaries on both backends (`$`/`_` count as word chars — differs
+  from `rg -w` at `$` and unicode edges, so patterns starting/ending with a
+  non-word char may not match); `\p{...}` unicode property escapes work on the
+  walker too, not just rg. rg match columns are character-based (byte offsets
+  converted post-0.8.6); walker cols are already char-based. A leading `(?i)`
+  in a `literal:false` pattern maps to `ignoreCase`.
 - **Runaway guard** (`guardCwd`, 66–71): refuses filesystem root and home directory
   (via `HOME`/`USERPROFILE`) for both find and grep.
 - **git:modified** (`gitModifiedSet`, 101–115): fresh `git status --porcelain` per call;

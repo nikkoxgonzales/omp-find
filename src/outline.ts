@@ -61,7 +61,9 @@ const CPP: Rule[] = [
 const GENERIC: Rule[] = [
   { re: new RegExp(`^(class|function|def|fn|func|interface|enum|struct|type)\\s+(${WORD})`), kind: "", nameIdx: 2 },
 ];
-/** Method-name blocklist: control-flow/calls that mimic a signature. */
+/** Method-name blocklist: control-flow/calls that mimic a signature. Own-
+ * property test only — `constructor`, `toString` & friends are real method
+ * names that must not be dropped via Object.prototype leakage. */
 const NOT_A_METHOD: Record<string, true> = { if: true, for: true, while: true, switch: true, catch: true, return: true, new: true, super: true, this: true, typeof: true, sizeof: true, assert: true, print: true, println: true };
 
 /** Comment-only line openers (checked on the trimmed line). */
@@ -128,7 +130,7 @@ export async function outlineFile(file: string, opts: OutlineOptions = {}): Prom
       const m = rule.re.exec(trimmed);
       if (!m) continue;
       const name = m[rule.nameIdx];
-      if (!name || NOT_A_METHOD[name]) break;
+      if (!name || Object.hasOwn(NOT_A_METHOD, name)) break;
       const kind = rule.kind || m[1];
       const col = line.indexOf(name) + 1;
       out.push({ line: i + 1, col: col > 0 ? col : 1, kind, name });
