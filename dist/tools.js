@@ -167,9 +167,36 @@ function strParam(params, key) {
     const v = params[key];
     return typeof v === "string" && v.length > 0 ? v : undefined;
 }
+/** Strict variant for the primary params (pattern/symbol/path/references): a
+ * defined non-string value is a caller bug — surface it instead of silently
+ * treating the param as absent (a number used to fall through to the missing-
+ * param error, or worse, satisfy a resume drift check as "unset"). */
+function strictStrParam(params, key) {
+    const v = params[key];
+    if (v === undefined)
+        return undefined;
+    if (typeof v !== "string")
+        throw new Error(`${key}: expected string`);
+    return v.length > 0 ? v : undefined;
+}
 function numParam(params, key) {
     const v = params[key];
-    return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.min(Math.floor(v), PAGE_MAX) : undefined;
+    if (v === undefined)
+        return undefined;
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 1)
+        throw new Error(`${key} must be >= 1`);
+    return Math.min(Math.floor(v), PAGE_MAX);
+}
+/** Best-effort frecency bump for our own file-targeted calls (ffoutline's file,
+ * ffcapsule's resolved def file). Fire-and-forget: never awaited, never throws —
+ * a frecency hiccup must not fail a tool call. */
+function safeRecordOpen(frecency, p) {
+    if (p === undefined)
+        return;
+    try {
+        void Promise.resolve(frecency?.recordOpen(p)).catch(() => undefined);
+    }
+    catch { /* frecency tracking never breaks a tool call */ }
 }
 async function safeScore(frecency, p) {
     try {
@@ -504,10 +531,10 @@ export function registerFindTools(pi, deps, opts = {}) {
                     rawPath = st.path;
                     bound = { total: st.total, backend: st.backend };
                     const diff = [];
-                    const inPattern = strParam(params, "pattern");
+                    const inPattern = strictStrParam(params, "pattern");
                     if (inPattern !== undefined && inPattern !== st.pattern)
                         diff.push("pattern");
-                    const inPath = strParam(params, "path");
+                    const inPath = strictStrParam(params, "path");
                     if (inPath !== undefined && inPath !== st.path)
                         diff.push("path");
                     const inLimit = numParam(params, "limit");
@@ -523,9 +550,9 @@ export function registerFindTools(pi, deps, opts = {}) {
                     backend = live.backend;
                 }
                 else {
-                    const pattern = strParam(params, "pattern") ?? "";
+                    const pattern = strictStrParam(params, "pattern") ?? "";
                     rawPattern = pattern;
-                    rawPath = strParam(params, "path");
+                    rawPath = strictStrParam(params, "path");
                     const dirParam = rawPath;
                     limit = numParam(params, "limit") ?? FIND_PAGE;
                     offset = 0;
@@ -621,7 +648,7 @@ export function registerFindTools(pi, deps, opts = {}) {
         parameters: {
             type: "object",
             properties: {
-                pattern: { type: "string", description: "Search text or regex (required). Literal by default: quotes/parens need no escaping" },
+                pattern: { type: "string", description: "Search text or regex. Literal by default: quotes/parens need no escaping. Required unless resuming with cursor" },
                 path: { type: "string", description: "File filter: dir/ prefix ('src/'), glob ('*.ts'), or bare filename ('server.py'); applies over the full result set" },
                 literal: { type: "boolean", description: "Literal match (default true); set false to use regex" },
                 ignoreCase: { type: "boolean", description: "Case-insensitive match (default false)" },
@@ -636,7 +663,6 @@ export function registerFindTools(pi, deps, opts = {}) {
                 maxChars: { type: "number", description: "Max output chars; when exceeded returns per-file counts instead of rows" },
                 concise: { type: "boolean", description: "Concise path:line rows (default false) — existence probe without text; ignores context params" },
             },
-            required: ["pattern"],
             additionalProperties: false,
         },
         execute: async (_toolCallId, params) => {
@@ -671,10 +697,10 @@ export function registerFindTools(pi, deps, opts = {}) {
                     concise = st.concise === true;
                     bound = { total: st.total, backend: st.backend };
                     const diff = [];
-                    const inPattern = strParam(params, "pattern");
+                    const inPattern = strictStrParam(params, "pattern");
                     if (inPattern !== undefined && inPattern !== st.pattern)
                         diff.push("pattern");
-                    const inPath = strParam(params, "path");
+                    const inPath = strictStrParam(params, "path");
                     if (inPath !== undefined && inPath !== st.pathFilter)
                         diff.push("path");
                     const inLimit = numParam(params, "limit");
@@ -694,7 +720,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     resumeNote = cursorParamNote(diff);
                 }
                 else {
-                    const p = strParam(params, "pattern");
+                    const p = strictStrParam(params, "pattern");
                     if (!p)
                         return text(`${toolName} failed: provide a pattern`);
                     pattern = p;
@@ -702,7 +728,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     ignoreCase = params["ignoreCase"] === true;
                     wholeWord = params["wholeWord"] === true;
                     smartCase = params["smartCase"] === true;
-                    pathFilter = strParam(params, "path");
+                    pathFilter = strictStrParam(params, "path");
                     scope = scopePin(pathFilter);
                     limit = numParam(params, "limit") ?? GREP_PAGE;
                     offset = 0;
@@ -829,7 +855,7 @@ export function registerFindTools(pi, deps, opts = {}) {
         },
     });
     const outlineDef = (toolName) => ({
-        description: "Approximate per-file symbol overview (omp-find). Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline->grep->read. Regex-based, not LSP-accurate; every hit carries a line number — verify with read/ffgrep. Does not record frecency.",
+        description: "Approximate per-file symbol overview (omp-find). Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline->grep->read. Regex-based, not LSP-accurate; every hit carries a line number — verify with read/ffgrep. Outlining a file records it as opened for frecency.",
         promptSnippet: "Outline one file's symbols (approximate shape; verify with read)",
         approval: "read",
         promptGuidelines: [
@@ -839,7 +865,7 @@ export function registerFindTools(pi, deps, opts = {}) {
         parameters: {
             type: "object",
             properties: {
-                path: { type: "string", description: "Single file to outline, e.g. 'src/search.ts' (resolved under cwd)" },
+                path: { type: "string", description: "Single file to outline, e.g. 'src/search.ts' (resolved under cwd) — required unless resuming with cursor" },
                 cwd: { type: "string", description: "Scan root: absolute directory holding the file (default: session cwd)" },
                 depth: { type: "number", description: "0 = top-level symbols (default), 1 = also one nesting level" },
                 limit: { type: "number", description: "Max symbols per page (default 30, max 50)" },
@@ -847,7 +873,6 @@ export function registerFindTools(pi, deps, opts = {}) {
                 maxChars: { type: "number", description: "Max output chars; when exceeded returns kind counts instead of rows" },
                 concise: { type: "boolean", description: "Concise name-only rows (default false) — minified shape probe; drops locations" },
             },
-            required: ["path"],
             additionalProperties: false,
         },
         execute: async (_toolCallId, params) => {
@@ -874,7 +899,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     concise = st.concise === true;
                     bound = { total: st.total };
                     const diff = [];
-                    const inPath = strParam(params, "path");
+                    const inPath = strictStrParam(params, "path");
                     if (inPath !== undefined && inPath !== st.file)
                         diff.push("path");
                     const inLimit = numParam(params, "limit");
@@ -889,7 +914,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     resumeNote = cursorParamNote(diff);
                 }
                 else {
-                    const f = strParam(params, "path");
+                    const f = strictStrParam(params, "path");
                     if (!f)
                         return text(`${toolName} failed: provide a path`);
                     file = f;
@@ -903,6 +928,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                     concise = params["concise"] === true;
                 }
                 const res = await search.outlineFile(file, { cwd, depth });
+                safeRecordOpen(frecency, file); // outlining a file counts as opening it
                 if (bound !== undefined && snapshotMismatch(bound, { total: res.total }))
                     return staleCursor(toolName);
                 const disp = toDisplay(file);
@@ -947,7 +973,7 @@ export function registerFindTools(pi, deps, opts = {}) {
         parameters: {
             type: "object",
             properties: {
-                symbol: { type: "string", description: "Symbol name, e.g. 'parseFindQuery'" },
+                symbol: { type: "string", description: "Symbol name, e.g. 'parseFindQuery' — required unless resuming with cursor" },
                 path: { type: "string", description: "File constraint, e.g. 'src/', '*.ts'" },
                 cwd: { type: "string", description: "Scan root: absolute directory to search (default: session cwd); refused for filesystem-root and home" },
                 maxChars: { type: "number", description: "Max output chars; when exceeded returns per-file counts instead of rows" },
@@ -957,7 +983,6 @@ export function registerFindTools(pi, deps, opts = {}) {
                 exact_only: { type: "boolean", description: "Exact-only: drop possible mentions (member access `.SYM`, comments), keep import/call-paren sites" },
                 depth: { type: "number", description: "Caller depth 1|2|3 (default 1) — BFS over enclosing symbols for transitive callers; rows labeled depth:N; downstream callees out of scope" },
             },
-            required: ["symbol"],
             additionalProperties: false,
         },
         execute: async (_toolCallId, params) => {
@@ -970,6 +995,12 @@ export function registerFindTools(pi, deps, opts = {}) {
                 let bound;
                 let resumeNote;
                 const cursorId = strParam(params, "cursor");
+                // depth is a closed set — anything outside {1,2,3} used to clamp to 1
+                // silently; reject it on both fresh calls and resumes.
+                const depthParam = params["depth"];
+                if (depthParam !== undefined && depthParam !== 1 && depthParam !== 2 && depthParam !== 3) {
+                    return text(`${toolName} failed: depth must be 1, 2, or 3`);
+                }
                 if (cursorId) {
                     const st = cursors.get(cursorId);
                     if (!st || st.kind !== "callers")
@@ -985,10 +1016,10 @@ export function registerFindTools(pi, deps, opts = {}) {
                     maxChars = st.maxChars;
                     bound = { total: st.total, backend: st.backend };
                     const diff = [];
-                    const inSymbol = strParam(params, "symbol");
+                    const inSymbol = strictStrParam(params, "symbol");
                     if (inSymbol !== undefined && inSymbol !== st.symbol)
                         diff.push("symbol");
-                    const inPath = strParam(params, "path");
+                    const inPath = strictStrParam(params, "path");
                     if (inPath !== undefined && inPath !== st.pathFilter)
                         diff.push("path");
                     const inLimit = numParam(params, "limit");
@@ -1001,20 +1032,19 @@ export function registerFindTools(pi, deps, opts = {}) {
                         diff.push("ignoreCase");
                     if (params["exact_only"] !== undefined && (params["exact_only"] === true) !== st.exactOnly)
                         diff.push("exact_only");
-                    const inDepth = params["depth"];
-                    if (inDepth !== undefined && (inDepth === 2 ? 2 : inDepth === 3 ? 3 : 1) !== st.depth)
+                    if (depthParam !== undefined && depthParam !== st.depth)
                         diff.push("depth");
                     resumeNote = cursorParamNote(diff);
                 }
                 else {
-                    const s = strParam(params, "symbol");
+                    const s = strictStrParam(params, "symbol");
                     if (!s)
                         return text(`${toolName} failed: provide a symbol`);
                     symbol = s;
                     ignoreCase = params["ignoreCase"] === true;
-                    pathFilter = strParam(params, "path");
+                    pathFilter = strictStrParam(params, "path");
                     exactOnly = params["exact_only"] === true;
-                    depth = params["depth"] === 2 ? 2 : params["depth"] === 3 ? 3 : 1;
+                    depth = depthParam === 2 ? 2 : depthParam === 3 ? 3 : 1;
                     limit = numParam(params, "limit") ?? GREP_PAGE;
                     offset = 0;
                     cwd = cwdParam(params);
@@ -1127,9 +1157,9 @@ export function registerFindTools(pi, deps, opts = {}) {
                     maxChars = st.maxChars;
                     bound = { total: st.total, backend: st.backend };
                     const diff = [];
-                    const inP = strParam(params, "pattern");
-                    const inS = strParam(params, "symbol");
-                    const inR = strParam(params, "references");
+                    const inP = strictStrParam(params, "pattern");
+                    const inS = strictStrParam(params, "symbol");
+                    const inR = strictStrParam(params, "references");
                     const inGiven = [inP, inS, inR].filter((v) => v !== undefined);
                     if (inGiven.length > 1)
                         diff.push("pattern");
@@ -1138,7 +1168,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                         if (inQuery !== st.query)
                             diff.push("pattern");
                     }
-                    const inPath = strParam(params, "path");
+                    const inPath = strictStrParam(params, "path");
                     if (inPath !== undefined && inPath !== st.pathFilter)
                         diff.push("path");
                     const inLimit = numParam(params, "limit");
@@ -1158,16 +1188,16 @@ export function registerFindTools(pi, deps, opts = {}) {
                     resumeNote = cursorParamNote(diff);
                 }
                 else {
-                    const p = strParam(params, "pattern");
-                    const s = strParam(params, "symbol");
-                    const r = strParam(params, "references");
+                    const p = strictStrParam(params, "pattern");
+                    const s = strictStrParam(params, "symbol");
+                    const r = strictStrParam(params, "references");
                     const given = [p, s, r].filter((v) => v !== undefined && v !== "");
                     if (given.length !== 1)
                         return text(`${toolName} failed: provide exactly one of pattern, symbol, references`);
                     query = s !== undefined && s !== "" ? `symbol:${s}` : r !== undefined && r !== "" ? `references:${r}` : p;
                     language = strParam(params, "language");
                     ignoreCase = params["ignoreCase"] === true;
-                    pathFilter = strParam(params, "path");
+                    pathFilter = strictStrParam(params, "path");
                     rewrite = strParam(params, "rewrite");
                     limit = numParam(params, "limit") ?? GREP_PAGE;
                     offset = 0;
@@ -1266,7 +1296,7 @@ export function registerFindTools(pi, deps, opts = {}) {
                 if (typeof search.rankMap !== "function")
                     return text(`${toolName} failed: map unavailable`);
                 const cwd = cwdParam(params);
-                const scope = strParam(params, "path");
+                const scope = strictStrParam(params, "path");
                 const budget = charsParam(params, "maxChars") ?? 8000;
                 const res = await search.rankMap({ cwd });
                 statBackend = res.backend;
@@ -1321,14 +1351,13 @@ export function registerFindTools(pi, deps, opts = {}) {
         parameters: {
             type: "object",
             properties: {
-                symbol: { type: "string", description: "Symbol name, e.g. 'parseFindQuery'" },
+                symbol: { type: "string", description: "Symbol name, e.g. 'parseFindQuery' (required)" },
                 path: { type: "string", description: "File constraint, e.g. 'src/', '*.ts'" },
                 cwd: { type: "string", description: "Scan root: absolute directory to search (default: session cwd); refused for filesystem-root and home" },
                 ignoreCase: { type: "boolean", description: "Case-insensitive match" },
                 limit: { type: "number", description: "Max callers/imports shown each (default 10, max 50)" },
                 maxChars: { type: "number", description: "Max output chars; caller/import rows shrink to fit, noted when they do" },
             },
-            required: ["symbol"],
             additionalProperties: false,
         },
         execute: async (_toolCallId, params) => {
@@ -1338,16 +1367,17 @@ export function registerFindTools(pi, deps, opts = {}) {
             try {
                 if (typeof search.capsuleOf !== "function")
                     return text(`${toolName} failed: capsule unavailable`);
-                const s = strParam(params, "symbol");
+                const s = strictStrParam(params, "symbol");
                 if (!s)
                     return text(`${toolName} failed: provide a symbol`);
                 const cwd = cwdParam(params);
                 const ignoreCase = params["ignoreCase"] === true;
-                const pathFilter = strParam(params, "path");
+                const pathFilter = strictStrParam(params, "path");
                 const limit = numParam(params, "limit") ?? 10;
                 const maxChars = charsParam(params, "maxChars");
                 const res = await search.capsuleOf(s, { cwd, ignoreCase, pathFilter, limit });
                 statBackend = res.backend;
+                safeRecordOpen(frecency, res.defFile); // resolving a def counts as opening its file
                 const disp = (p) => toDisplay(p);
                 const lines = [];
                 if (res.defFile !== undefined)

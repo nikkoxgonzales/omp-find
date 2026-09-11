@@ -18,7 +18,7 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 - **`concise`** — density knob on `fffind`/`ffgrep`/`ffoutline`. Minified end of the rendering range: paths-only rows, `path:line` probes, name-only outlines. Composes with (not replaces) cursors + `maxChars`.
 - **`maxChars` budgets** — on every tool. Over-budget output degrades to counts/summaries instead of shell-pipe dumps: per-dir (find), per-file (grep/callers/structural), kind counts (outline), omitted-files footer (map), row shrinking (capsule).
 - **Query subset** — `dir/` prefix, `*.ext`-style globs, `!` exclusions, `git:modified`; leftover words fuzzy-match the path.
-- **Per-project JSON frecency** — every opened file bumps count + recency (7-day half-life decay); frequent/recent paths sort first. Stored under `%LOCALAPPDATA%/omp-find` (Windows) or `~/.omp/var/omp-find`, keyed by project-root hash.
+- **Per-project JSON frecency** — every opened file bumps count + recency (7-day half-life decay); frequent/recent paths sort first. Fed by host `tool_result` events for `read`/`edit`/`write` plus our own `ffoutline`/`ffcapsule` file targets. Stored under `%LOCALAPPDATA%/omp-find` (Windows) or `~/.omp/var/omp-find`, keyed by project-root hash.
 - **Cursor pagination** — default 30 results per page, max 50; fuller pages return an opaque `cursor` for the next page. Cursors bind to the fetched snapshot (result total + backend): resuming after the tree changes returns restart guidance (`results changed since page 1; re-run without cursor`), never a silently shifted page. Grep pages are path/line/col ordered on both backends.
 - **Override vs additive** — `fffind` / `ffgrep` are always registered; override (default) additionally claims `find` / `grep`, additive leaves the host's names alone.
 - **No persistent index** — `/find-rescan` just drops the frecency store; the next search rebuilds from disk. Runaway-tree guard refuses filesystem-root and home-directory scans.
@@ -51,7 +51,7 @@ ffgrep ("Grep content"; `grep` in override mode)
     "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with literal:true and a path filter."
     "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; stay literal unless regex is needed."
     "ffgrep: Scope with the path filter (dir/ prefix, *.ext glob, or bare filename like 'server.py') before broadening the search."
-  pattern (required): "Search text or regex (required). Literal by default: quotes/parens need no escaping"
+  pattern: "Search text or regex. Literal by default: quotes/parens need no escaping. Required unless resuming with cursor"
   path: "File filter: dir/ prefix ('src/'), glob ('*.ts'), or bare filename ('server.py'); applies over the full result set"
   literal: "Literal match (default true); set false to use regex"
   ignoreCase: "Case-insensitive match (default false)"
@@ -66,13 +66,13 @@ ffgrep ("Grep content"; `grep` in override mode)
   maxChars: "Max output chars; when exceeded returns per-file counts instead of rows"
   concise: "Concise path:line rows (default false) — existence probe without text; ignores context params"
 ffoutline ("Outline file"; `outline` alias, always registered)
-  "Approximate per-file symbol overview (omp-find). Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline->grep->read. Regex-based, not LSP-accurate; every hit carries a line number — verify with read/ffgrep. Does not record frecency."
+  "Approximate per-file symbol overview (omp-find). Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline->grep->read. Regex-based, not LSP-accurate; every hit carries a line number — verify with read/ffgrep. Outlining a file records it as opened for frecency."
   approval: read
   promptSnippet: "Outline one file's symbols (approximate shape; verify with read)"
   promptGuidelines:
     "ffoutline: Outline a new file before reading it — never read whole files or run ctags shells to learn shape."
     "ffoutline: Compose outline->grep->read: outline for shape, ffgrep on one symbol, read the range."
-  path (required): "Single file to outline, e.g. 'src/search.ts'"
+  path: "Single file to outline, e.g. 'src/search.ts' (resolved under cwd) — required unless resuming with cursor"
   depth: "0 = top-level symbols (default), 1 = also one nesting level"
   limit: "Max symbols per page (default 30, max 50)"
   cursor: "Opaque pagination cursor from a previous call"
@@ -85,7 +85,7 @@ ffcallers ("Find callers")
   promptGuidelines:
     "ffcallers: Never chain shell greps for who-calls-X — one ffcallers call ranks them all."
     "ffcallers: Confirm shortlisted sites with read; output is approximate, not LSP references."
-  symbol (required): "Symbol name, e.g. 'parseFindQuery'"
+  symbol: "Symbol name, e.g. 'parseFindQuery' — required unless resuming with cursor"
   path: "File constraint, e.g. 'src/', '*.ts'"
   ignoreCase: "Case-insensitive match"
   limit: "Max matches per page (default 30, max 50)"
@@ -129,13 +129,13 @@ ffcapsule ("Symbol dossier"; `capsule` alias, always registered)
   promptGuidelines:
     "ffcapsule: Learn one symbol with a single ffcapsule call instead of chaining ffoutline, ffgrep and ffcallers by hand."
     "ffcapsule: Follow the Guidance: footer — it names the cheapest next call from the data."
-  symbol (required): "Symbol name, e.g. 'parseFindQuery'"
+  symbol: "Symbol name, e.g. 'parseFindQuery' (required)"
   path: "File constraint, e.g. 'src/', '*.ts'"
   cwd: "Scan root: absolute directory to search (default: session cwd)"
   ignoreCase: "Case-insensitive match"
   limit: "Max callers/imports shown each (default 10, max 50)"
   maxChars: "Max output chars; caller/import rows shrink to fit, noted when they do"
-Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." / "ffmap failed: ..." / "ffcapsule failed: ..." (no/excess pattern/symbol/references, unknown/expired cursor, non-absolute cwd).
+Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." / "ffmap failed: ..." / "ffcapsule failed: ..." (no/excess pattern/symbol/references, unknown/expired cursor, non-absolute cwd, `depth` outside 1|2|3, `limit` < 1, non-string primary params).
 Stale cursors (tree changed since page 1) return restart guidance as text: "...: results changed since page 1; re-run without cursor".
 Each execute also returns `details: { totalMatched, totalFiles, truncated }` (pi-fff packaging: totals over the full result set, `truncated` when a next page or count-fallback applies); hosts that ignore it see identical text. Paged results add a `"<limit> matches limit reached (max 50) — more via cursor"` notice next to the cursor footer.
 ```
@@ -217,11 +217,11 @@ caches dropped (nothing cached)
 |---|---|---|
 | `dir/` | Only paths under this directory (first such token) | `src/ main` |
 | `*.ext` / globs | Keep paths matching `*`, `**`, `?`, `{a,b}`, `[...]` | `*.ts !*.test.ts` |
-| `!pat` | Exclude paths containing this text | `main !dist` |
+| `!pat` | Exclude by exact path, `dir/` prefix, path segment, or glob (`!*.test.ts`) — not a substring match | `main !dist` |
 | `git:modified` | Only files `git status --porcelain` reports (errors outside a repo) | `git:modified api` |
 | remaining words | Fuzzy subsequence match against the path | `srv usr` → `src/user.ts` |
 
-`ffgrep` takes the same idea through parameters instead: `pattern` (required), optional `path` filter (`src/`, `*.ts`, or a bare filename like `server.py`), `literal` (default `true`), `ignoreCase`, plus `wholeWord` (no more hand-rolled `\b` regexes) and `smartCase` (no more case juggling — lowercase matches all cases, uppercase restores sensitivity).
+`ffgrep` takes the same idea through parameters instead: `pattern` (required unless resuming with `cursor`), optional `path` filter (`src/`, `*.ts`, or a bare filename like `server.py`), `literal` (default `true`), `ignoreCase`, plus `wholeWord` (no more hand-rolled `\b` regexes) and `smartCase` (no more case juggling — lowercase matches all cases, uppercase restores sensitivity).
 
 Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no other terms lists recently modified files — frecency re-ranks the set, so the files you actually touch keep floating up. Explain recipe (≈ `codedb_explain`): `ffcapsule <symbol>` fuses signature, doc comment, callers, imports, and a data-driven `Guidance:` next step in one call instead of chaining outline/grep/callers by hand.
 
@@ -277,6 +277,15 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 - `ffoutline` covers `export async function` declarations alongside plain `function`.
 - `ffstructural` `inside:`/`has:` take one `OUTER >> INNER` / `OUTER << INNER` pair — chained combinators (`inside: a >> b >> c`) are rejected, not nested.
 - `concise` exists only on `fffind`/`ffgrep`/`ffoutline`; other tools ignore it.
+- `limit` must be ≥ 1 — `limit: 0` errors (`limit must be >= 1`) instead of silently paging at the default.
+- `ffcallers` `depth` accepts only 1|2|3 — other values error (`depth must be 1, 2, or 3`) instead of clamping to 1.
+- Primary params (`pattern`/`symbol`/`path`/`references`) must be strings when given — a non-string errors (`<param>: expected string`) instead of coercing or passing silently.
+- Primary params are optional in the schema when `cursor` is present — `{cursor}` alone resumes on the stored page-1 params.
+- `ffstructural` `language` is a lowering hint only — it does not restrict which file types are searched.
+- On Windows the tree walk skips DOS device names (`nul`, `con`, `aux`, `prn`, `com1`–`com9`, `lpt1`–`lpt9`) — they can't be opened as files.
+- A `.git` pointer FILE (linked worktree/submodule) doesn't activate gitignore honoring — rg treats the tree as a plain directory; the walker skips the pointer file itself.
+- Binary files are skipped silently by grep (NUL-byte check) — no "skipped binary" note.
+- The `MAX_DEPTH=25` cutoff is silent — deeper files simply don't appear.
 
 ## Config
 

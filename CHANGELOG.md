@@ -2,6 +2,19 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.8]
+
+### Fixed
+
+- Frecency is now wired: `tool_result` events for read/edit/write record opens, and ffoutline/ffcapsule record their target files — `fffind` ranking now actually learns (previously recordOpen had zero call sites; all stores stayed empty).
+- Cursor-only resume works: `{"cursor":"grep_c5"}` no longer fails schema validation — the primary param is optional when a cursor is present (the footer's own 'pass cursor' hint now works verbatim).
+- `ffoutline` depth:1 lists methods with single-line `{}` bodies, trailing commas, and Java constructors (new `ctor` kind).
+- `ffstructural kind:class` matches `public`/`private`/`final`/`sealed`/`export default` classes; `kind:call` no longer returns the definition line.
+- `ffcapsule` def-hunt prefers source files over docs/dist — `capsule parseFindQuery` resolves src/search.ts, not a README example.
+- `ffcallers` `ignoreCase` no longer leaks the definition line; keyword-less defs (object-literal methods, `constructor(`) are filtered from caller rows.
+- `ffcallers` `depth` validates to 1|2|3 (was silently clamped); `limit` must be >= 1; non-string pattern/symbol/path params rejected with `expected string`.
+- `scan root is not a directory` distinguishes file-as-cwd from a missing root.
+
 ## [0.8.7]
 
 ### Fixed

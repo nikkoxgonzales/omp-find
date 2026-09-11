@@ -294,11 +294,11 @@ describe('findPaths filters: excludes, skips, links', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-  it('a file path as cwd throws scan root not found', async () => {
+  it('a file path as cwd throws scan root is not a directory', async () => {
     const root = await fixture({ 'a.ts': 'x' });
     try {
-      await assert.rejects(search.findPaths('', { cwd: join(root, 'a.ts'), scan: 'mock' }), /scan root not found/);
-      await assert.rejects(search.findPaths('', { cwd: join(root, 'a.ts') }), /scan root not found/);
+      await assert.rejects(search.findPaths('', { cwd: join(root, 'a.ts'), scan: 'mock' }), /scan root is not a directory/);
+      await assert.rejects(search.findPaths('', { cwd: join(root, 'a.ts') }), /scan root is not a directory/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

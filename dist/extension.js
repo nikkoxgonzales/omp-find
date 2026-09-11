@@ -34,4 +34,29 @@ export default function ompFindExtension(pi) {
     catch {
         // Hosts without an event emitter simply skip the warm scan.
     }
+    try {
+        // Frecency feed: a successful read/edit/write on a file counts as an open.
+        // Without this hook recordOpen had zero call sites and frecency.json stayed
+        // empty forever. Best-effort like session_start — a malformed event or a
+        // host without the event must never break load.
+        pi.on?.("tool_result", (event) => {
+            try {
+                const e = event;
+                if (e == null || e.isError === true)
+                    return undefined;
+                if (e.toolName !== "read" && e.toolName !== "edit" && e.toolName !== "write")
+                    return undefined;
+                const p = e.input?.path;
+                if (typeof p !== "string" || p.length === 0)
+                    return undefined;
+                return frecency.recordOpen(p).catch(() => undefined);
+            }
+            catch {
+                return undefined;
+            }
+        });
+    }
+    catch {
+        // Hosts without an event emitter simply skip frecency tracking.
+    }
 }

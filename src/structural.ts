@@ -89,7 +89,7 @@ both grep backends match line-by-line). */
 const KIND_PATTERNS: Record<string, string> = {
   call: "\\b[A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*\\s*\\(",
   function: "^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+)*(?:function|def|fn|func)\\b",
-  class: "^\\s*(?:export\\s+|abstract\\s+)*(?:class|struct|enum|interface|trait)\\b",
+  class: "^\\s*(?:export\\s+|default\\s+|abstract\\s+|public\\s+|private\\s+|protected\\s+|final\\s+|sealed\\s+|static\\s+)*(?:class|struct|enum|interface|trait)\\b",
   import: "^\\s*(?:import|from|require|use|include)\\b",
   return: "^\\s*return\\b",
 };
@@ -104,7 +104,7 @@ function defPattern(name: string): string {
   // that can never match (`foo$ ` has no word/non-word transition).
   const esc = escapeRegExp(name);
   const right = /\w$/.test(esc) ? "\\b" : "(?![\\w$])";
-  return `^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+|abstract\\s+)*(?:function|def|fn|func|class|struct|enum|interface|trait|type|const|let|var)\\s+${esc}${right}`;
+  return `^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+|abstract\\s+|final\\s+|sealed\\s+)*(?:function|def|fn|func|class|struct|enum|interface|trait|type|const|let|var)\\s+${esc}${right}`;
 }
 
 /** Alias map to the outline.ts language families; unknown input stays generic
@@ -205,6 +205,28 @@ export async function structuralGrep(pattern: string, opts: StructuralOptions = 
     return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend: innerRes.backend, capped: innerRes.capped };
   }
   const res = await grepContents(compiled.regex, { ...base, scan, literal: false });
+  if (compiled.regex === KIND_PATTERNS.call) {
+    // kind:call's `name(` shape also matches the definition line of that name
+    // (`function foo(`, `foo(): void {`, `constructor(`). Drop rows whose line
+    // defines the callee — same approximation callersOf's def filter makes.
+    // The keyword-less shape needs signature evidence (`)` then `:`/`{`) so
+    // bare call statements survive; `constructor(` is never a call.
+    const callee = /\b([A-Za-z_$][\w$]*)\s*\(/g;
+    const isDefLine = (text: string): boolean => {
+      let c: RegExpExecArray | null;
+      callee.lastIndex = 0;
+      while ((c = callee.exec(text)) !== null) {
+        const name = c[1], esc = escapeRegExp(name);
+        const right = /\w$/.test(esc) ? "\\b" : "(?![\\w$])";
+        if (new RegExp(defPattern(name)).test(text)) return true;
+        if (new RegExp(`^\\s*(?:(?:public|private|protected|static|async|abstract|override|readonly|final|sealed|get|set)\\s+)*${esc}${right}\\s*\\([^;]*\\)\\s*[:{]`).test(text)) return true;
+        if (name === "constructor" && new RegExp(`^\\s*(?:(?:public|private|protected)\\s+)*${esc}${right}\\s*\\(`).test(text)) return true;
+      }
+      return false;
+    };
+    const kept = res.matches.filter((m) => !isDefLine(m.text));
+    return { matches: pageOf(kept, opts.limit, opts.offset), total: kept.length, backend: res.backend, capped: res.capped };
+  }
   return { matches: pageOf(res.matches, opts.limit, opts.offset), total: res.total, backend: res.backend, capped: res.capped };
 }
 

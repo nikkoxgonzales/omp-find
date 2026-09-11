@@ -19,7 +19,7 @@ const TS = [
     { re: new RegExp(`^(?:export\\s+)?(?:const\\s+)?enum\\s+(${IDENT})`), kind: "enum", nameIdx: 1 },
     { re: new RegExp(`^(?:export\\s+)?type\\s+(${IDENT})`), kind: "type", nameIdx: 1 },
     { re: new RegExp(`^(?:export\\s+)?const\\s+(${IDENT})\\s*=.*=>`), kind: "const", nameIdx: 1 },
-    { re: new RegExp(`^(?:(?:public|private|protected|static|async|abstract|override|readonly)\\s+|\\*\\s*)*(?:get\\s+|set\\s+)?(${IDENT})\\s*\\([^;]*\\)\\s*(?::\\s*[^{};]+)?\\s*\\{?\\s*$`), kind: "method", nameIdx: 1, nested: true },
+    { re: new RegExp(`^(?:(?:public|private|protected|static|async|abstract|override|readonly)\\s+|\\*\\s*)*(?:get\\s+|set\\s+)?(${IDENT})\\s*\\([^;]*\\)\\s*(?::\\s*[^{};]+)?\\s*(?:\\{[^\\n]*)?,?\\s*$`), kind: "method", nameIdx: 1, nested: true },
 ];
 const PY = [
     { re: new RegExp(`^(?:async\\s+)?def\\s+(${WORD})`), kind: "def", nameIdx: 1 },
@@ -35,7 +35,8 @@ const RUST = [
 ];
 const JAVA = [
     { re: new RegExp(`^(?:(?:public|private|protected|static|final|abstract|sealed|partial|internal|synchronized)\\s+)*(class|interface|enum|record|struct)\\s+(${WORD})`), kind: "", nameIdx: 2 },
-    { re: new RegExp(`^(?:(?:public|private|protected|static|final|async|override|virtual|synchronized)\\s+)*[\\w<>.\\[\\],? ]+\\s+(${WORD})\\s*\\([^;]*\\)\\s*(?:throws\\s+[\\w,\\s.]+)?\\s*\\{?\\s*$`), kind: "method", nameIdx: 1, nested: true },
+    { re: new RegExp(`^(?:(?:public|private|protected|static|final|async|override|virtual|synchronized)\\s+)*[\\w<>.\\[\\],? ]+\\s+(${WORD})\\s*\\([^;]*\\)\\s*(?:throws\\s+[\\w,\\s.]+)?\\s*(?:\\{[^\\n]*)?,?\\s*$`), kind: "method", nameIdx: 1, nested: true },
+    { re: new RegExp(`^(?:(?:public|private|protected)\\s+)*(${WORD})\\s*\\([^;]*\\)\\s*(?:throws\\s+[\\w,\\s.]+)?\\s*(?:\\{[^\\n]*)?,?\\s*$`), kind: "ctor", nameIdx: 1, nested: true },
 ];
 /** C/C++ kept coarse: type declarations plus plausible top-level function definitions. */
 const CPP = [

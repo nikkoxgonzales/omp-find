@@ -1,16 +1,16 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.7). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.8). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
 | File | Owns |
 |---|---|
 | `src/search.ts` (337 lines) | `parseFindQuery`, `globToRegExp`, `findPaths`, `grepContents`, `warmScan`, `status`, `clearCache`; consts `PAGE_DEFAULT=30`, `PAGE_MAX=50` (line 5), `RG_BUFFER=64MB`, `GREP_CAP=20000`, `MAX_DEPTH=25` (line 6), `MAX_GREP_BYTES=2MB` / `MAX_GREP_SIZE="2M"` (8), `GREP_TIMEOUT_DEFAULT=30000` (10) |
-| `src/tools.ts` (492 lines) | `resolveFindMode`, `registerFindTools`, cursor store (`cursors`, `storeCursor` lines 19–30, 200-entry cap), `applyPathFilter` (74–88) |
+| `src/tools.ts` (~1300 lines) | `resolveFindMode`, `registerFindTools`, cursor store (`cursors`, `storeCursor`, 200-entry cap), `applyPathFilter`, `strictStrParam`/`numParam` param validation, `safeRecordOpen` |
 | `src/frecency.ts` (~100 lines) | `storePath`, `recordOpen`, `score`, `status`, `clear`; `HALF_LIFE_MS` 7 days (line 7) |
-| `src/extension.ts` (42 lines) | Default-export factory; static imports (fail loudly at load); `session_start` warm scan |
+| `src/extension.ts` (~62 lines) | Default-export factory; static imports (fail loudly at load); `session_start` warm scan; `tool_result` frecency feed (read/edit/write opens) |
 | `src/commands.ts` (~92 lines) | `/find-health`, `/find-rescan` via deps bag |
 | `test/find.mjs` | node:test suite (`npm test` = `tsc` build + `node --test`) |
 | `dist/` (committed) | Built output; plugin entry `dist/extension.js` |
@@ -25,7 +25,7 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   additionally scopes the listing (`scope` through `listFiles`), so pinned dot-dir
   files list on both backends. Unknown/expired cursor → error text naming the
   cursor (123); all throws caught → `"fffind failed: …"` (145).
-- **`ffgrep`** — content search (`tools.ts:150–207`). `pattern` required (177);
+- **`ffgrep`** — content search (`tools.ts:150–207`). `pattern` required unless resuming with `cursor` (177);
   `literal` defaults true (179), `ignoreCase` opt-in (180). Path filter applies
   **tools-side over the full result set**: unfiltered queries pass limit/offset to
   `grepContents`; filtered ones fetch all then filter + slice (188–194) — a bounded
@@ -79,8 +79,11 @@ and is reserved for future tools so the default stays lean.
 
 Per-project JSON (`frecency.ts:20–28`): `%LOCALAPPDATA%/omp-find` on win32, else
 `~/.omp/var/omp-find`, keyed by 16-hex-char sha1 of resolved cwd (`projectHash`, 16–18).
-Keys normalized to forward slashes (30–32). `recordOpen` bumps count + recency;
-`score` decays `count × 0.5^(age/half-life)` (7-day half-life, line 7), unknown paths 0.
+Keys normalized to forward slashes (30–32). `recordOpen` bumps count + recency —
+fed by the extension's `tool_result` hook (successful `read`/`edit`/`write`
+results with a string `input.path`) and by the tools layer itself (`ffoutline`
+records its file, `ffcapsule` records the resolved def file — both
+fire-and-forget via `safeRecordOpen`).
 Persist is atomic (sidecar write + fsync, then copyFile over live — never
 rename-over-live on Windows, 45–58). `clear()` drops store + memory cache. Never
 throws (`recordOpen`/`score`/`clear` all swallow). Writes serialize through an
@@ -100,7 +103,7 @@ Default 30, max 50, enforced in two places: `numParam` clamps tool params
 200-entry cap with oldest eviction) capturing full query state (query/limit/offset/cwd;
 pattern/literal/ignoreCase/pathFilter/…). Footer when more remain:
 `... (N more; pass cursor "…" for the next page)` (`tools.ts:139–142, 196–201`).
-Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap or a rename/content-preserving mutation between pages is invisible to resume. Resume is a stateless re-fetch — resuming the same cursor twice returns the same rows and mints a fresh cursor id each time. Grep pages are path/line/col ordered on both backends.
+Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap or a rename/content-preserving mutation between pages is invisible to resume. Resume is a stateless re-fetch — resuming the same cursor twice returns the same rows and mints a fresh cursor id each time. Grep pages are path/line/col ordered on both backends. The primary param (`pattern`/`path`/`symbol`, or ffstructural's one-of) is optional in the schema when `cursor` is present, so `{cursor}` alone passes host validation and resumes on stored params; without a cursor the missing-param error still fires. `limit` must be ≥ 1 (`limit: 0` errors `limit must be >= 1`), `ffcallers` `depth` must be 1|2|3 (anything else errors `depth must be 1, 2, or 3` — no silent clamp), and primary params must be strings when given (`<param>: expected string`).
 Resume runs on page-1 params: extra params passed alongside `cursor` are
 ignored and flagged with a `note: cursor params in effect (…)` line rather
 than silently applied or rejected. Loading the extension twice shares one
@@ -209,7 +212,8 @@ counts, grep/callers/structural→per-file counts, outline→kind counts) comple
   `/*`, `*`, `<!--`, `--`) skipped; >2 MB/binary → empty. Re-exported through
   `search.ts` so the tool-layer `search` dep carries it without host rewiring.
   Card: "Use instead of reading whole files or ctags shells to learn file
-  shape … outline->grep->read." Never calls `recordOpen` (frecency on open only).
+  shape … outline->grep->read." Records the outlined file via `recordOpen`
+  (fire-and-forget) — outlining counts as opening.
 - **`ffcallers`** — `search.callersOf(symbol, opts)` → `GrepResult`: 3 rg/walker
   patterns (`\bSYM\s*\(`, import/from/require/use/include lines, `\.SYM\b`),
   definition lines filtered, merged/deduped by `path:line`, sorted path→line,

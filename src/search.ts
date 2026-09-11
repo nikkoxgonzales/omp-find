@@ -78,15 +78,15 @@ function guardCwd(cwd: string): void {
 }
 /** Nonexistent scan root → clean error instead of silent zero-state (rg spawn
  * fails → walker readdir catch → []). Thrown before any backend runs; the tools
- * layer surfaces it as `<tool> failed: scan root not found: <dir>`. */
+ * layer surfaces it as `<tool> failed: scan root not found|is not a directory: <dir>`. */
 async function assertCwdExists(cwd: string): Promise<void> {
+  let st;
   try {
-    const st = await fs.stat(cwd);
-    if (!st.isDirectory()) throw new Error(`scan root not found: ${cwd}`);
-  } catch (err) {
-    if (err instanceof Error && err.message.startsWith("scan root not found")) throw err;
+    st = await fs.stat(cwd);
+  } catch {
     throw new Error(`scan root not found: ${cwd}`);
   }
+  if (!st.isDirectory()) throw new Error(`scan root is not a directory: ${cwd}`);
 }
 /** rg spawn/runtime failures that downgrade to the walker: rg missing (ENOENT),
  * argv too long for the OS (ENAMETOOLONG/E2BIG — 64KB+ patterns), stdout over
@@ -618,14 +618,22 @@ async function directCallers(sym: string, base: { cwd?: string; ignoreCase: bool
   const bound = symBound(esc); // $foo resolves: $ counts as an identifier char here
   const rightEdge = /\w$/.test(esc) ? "\\b" : "(?![\\w$])";
   const patterns = [`${bound}\\s*\\(`, `(?:import|from|require|use|include)\\b[^\\n]*${bound}`, `\\.${esc}${rightEdge}`];
-  const defRe = new RegExp(`^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+)*(?:function|def|fn|func|class)\\b[^\\n]*${bound}`);
+  const flags = base.ignoreCase ? "i" : "";
+  const defRe = new RegExp(`^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+)*(?:function|def|fn|func|class)\\b[^\\n]*${bound}`, flags);
+  // Keyword-less def shapes (object-literal methods, constructors, getters):
+  // `ping(): number {`, `constructor() {}`, `get ping() {`. The tail requires
+  // the close paren to run into `:` or `{` — signature evidence — so bare call
+  // statements (`foo();`, `foo()`) still count as callers.
+  const defRe2 = new RegExp(`^\\s*(?:(?:public|private|protected|static|async|abstract|override|readonly|get|set)\\s+)*${bound}\\s*\\([^;]*\\)\\s*[:{]`, flags);
+  // `constructor(` is the one keyword-less def that can end at the open paren:
+  // a bare `constructor(...)` statement is never a call (that's `super(`/`new X(`).
+  const ctorDefRe = sym.toLowerCase() === "constructor" ? new RegExp(`^\\s*(?:(?:public|private|protected)\\s+)*${bound}\\s*\\(`, flags) : null;
   // rg's \b only sees \w, so `\bfoo\b\s*\(` matches inside `$foo(`/`foo$bar(` —
   // and the rg patterns can't use lookarounds (rg rejects them → walker for
   // every callers call). Post-filter instead: a row only survives when the
   // trimmed line text shows a real identifier-boundary call or import site.
   // Member-access rows (`\.esc`) need no left-edge check — the literal dot is
   // never an identifier char.
-  const flags = base.ignoreCase ? "i" : "";
   const verifyCall = new RegExp(`(?<![\\w$])${esc}(?![\\w$])\\s*\\(`, flags);
   const verifyImport = new RegExp(`(?:import|from|require|use|include)\\b[^\\n]*(?<![\\w$])${esc}(?![\\w$])`, flags);
   const verify = [verifyCall, verifyImport, null];
@@ -656,7 +664,7 @@ async function directCallers(sym: string, base: { cwd?: string; ignoreCase: bool
         const line = await fullLine(m);
         if (line === undefined || !v.test(line)) continue;
       }
-      if (defRe.test(m.text)) continue;
+      if (defRe.test(m.text) || defRe2.test(m.text) || (ctorDefRe !== null && ctorDefRe.test(m.text))) continue;
       const key = `${m.path}:${m.line}`;
       if (seen.has(key)) continue;
       if (seen.size >= GREP_CAP) return { backend, fresh };
@@ -877,8 +885,20 @@ export async function capsuleOf(symbol: string, opts: CapsuleOptions = {}): Prom
     if (ordered.length >= 60) break;
     if (inScope(m.path.replace(/\\/g, "/")) && !ordered.includes(m.path)) ordered.push(m.path);
   }
+  // Def candidates tier by file kind: real source files outrank docs and
+  // generated output — a README example line (`function parseFindQuery(…)` in
+  // a fenced block) used to win the def slot over the actual definition when
+  // the doc file carried more mentions. Docs/dist are only a fallback when no
+  // source file yields a def. Relative order inside each tier is unchanged.
+  const CODE_EXT: Record<string, true> = { ".ts": true, ".tsx": true, ".mts": true, ".cts": true, ".js": true, ".jsx": true, ".mjs": true, ".cjs": true, ".py": true, ".go": true, ".rs": true, ".java": true, ".cs": true, ".c": true, ".h": true, ".cc": true, ".cpp": true, ".cxx": true, ".hpp": true, ".rb": true, ".php": true, ".swift": true, ".kt": true, ".kts": true, ".scala": true, ".lua": true, ".sh": true, ".bash": true, ".zsh": true, ".pl": true, ".ex": true, ".exs": true, ".erl": true, ".hs": true, ".ml": true, ".fs": true, ".clj": true, ".dart": true, ".vue": true, ".svelte": true };
+  const srcTier = (p: string): boolean => {
+    const d = p.replace(/\\/g, "/");
+    if (/(?:^|\/)(?:dist|docs?)\//.test(d)) return false;
+    return CODE_EXT[path.extname(d).toLowerCase()] === true;
+  };
+  const candidates = [...ordered.filter(srcTier), ...ordered.filter((p) => !srcTier(p))];
   let def: { file: string; line: number; kind: string } | undefined;
-  for (const f of ordered) {
+  for (const f of candidates) {
     // depth 1: methods (constructor, toString, …) are nested symbols — a
     // depth-0 pass can never see them, so capsuleOf('constructor') missed.
     let syms: OutlineSymbol[];
