@@ -315,7 +315,8 @@ function groupGrepBlocks(blocks: Array<{ path: string; rows: string[] }>, tags: 
 
 /** Tools-layer path filter for ffgrep (dir/ prefix, glob, or bare name). */
 function applyPathFilter(paths: string[], filter: string, glob: ((g: string) => RegExp) | undefined): string[] {
-  const f = filter.startsWith("./") ? filter.slice(2) : filter;
+  const flat = filter.replace(/\\/g, "/");
+  const f = flat.startsWith("./") ? flat.slice(2) : flat;
   if (f.endsWith("/")) {
     const dir = f.slice(0, -1);
     return paths.filter((p) => { const d = toDisplay(p); return d === dir || d.startsWith(`${dir}/`); });
@@ -651,9 +652,19 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         }
         const ungrouped = blocks.flatMap((b) => b.rows);
         if (total > 0 && overBudget(ungrouped.join("\n"), maxChars)) {
+          // Unfiltered fetches are paged, so counting the page would under-report
+          // files while printing the full total — re-fetch unbounded for the count
+          // pass (filtered fetches already hold the full set; rows stay paged).
+          let counted = matches;
+          if (pool === null) {
+            try {
+              counted = (await search.grepContents(pattern, { cwd, literal, ignoreCase, wholeWord, smartCase })).matches;
+            } catch { counted = matches; }
+          }
           const byFile = new Map<string, number>();
-          for (const m of matches) byFile.set(toDisplay(m.path), (byFile.get(toDisplay(m.path)) ?? 0) + 1);
-          return withDetails(`Matched ${total} hits in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
+          for (const m of counted) byFile.set(toDisplay(m.path), (byFile.get(toDisplay(m.path)) ?? 0) + 1);
+          const fileWord = byFile.size === 1 ? "file" : "files";
+          return withDetails(`Matched ${total} hits in ${byFile.size} ${fileWord} (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
         }
         const tags = await hashlineTagsFor(cwd, page.map((m) => m.path));
         const lines = groupGrepBlocks(blocks, tags);
@@ -706,6 +717,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
     },
     execute: async (_toolCallId: string, params: Record<string, unknown>) => {
       const t0 = Date.now();
+      let dispForError = "";
       try {
         if (typeof search.outlineFile !== "function") return text(`${toolName} failed: outline unavailable`);
         let file: string, depth: number, limit: number, offset: number, cwd: string | undefined, maxChars: number | undefined, concise: boolean;
@@ -714,12 +726,12 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         if (cursorId) {
           const st = cursors.get(cursorId);
           if (!st || st.kind !== "outline") return text(`${toolName} failed: unknown or expired cursor "${cursorId}"`);
-          file = st.file; depth = st.depth; limit = st.limit; offset = st.nextOffset; cwd = st.cwd; maxChars = st.maxChars; concise = st.concise === true;
+          file = st.file; dispForError = toDisplay(st.file); depth = st.depth; limit = st.limit; offset = st.nextOffset; cwd = st.cwd; maxChars = st.maxChars; concise = st.concise === true;
           bound = { total: st.total };
         } else {
           const f = strParam(params, "path");
           if (!f) return text(`${toolName} failed: provide a path`);
-          file = f;
+          file = f; dispForError = toDisplay(f);
           const d = params["depth"];
           depth = d === 1 ? 1 : 0;
           limit = numParam(params, "limit") ?? FIND_PAGE;
@@ -745,7 +757,11 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const details = { totalMatched: res.total, totalFiles: 1, truncated: hasMore };
         return withDetails(lines.length > 0 ? lines.join("\n") : `No symbols found in ${disp} (approximate scan)`, details);
       } catch (err) {
-        return text(`${toolName} failed: ${errMsg(err)}`);
+        // Missing-file reads surface raw syscall text + the absolute path —
+        // collapse to the relative display form (core error text untouched).
+        const msg = errMsg(err);
+        if (dispForError !== "" && msg.startsWith("outline: cannot read")) return text(`${toolName} failed: outline: cannot read ${dispForError}`);
+        return text(`${toolName} failed: ${msg}`);
       } finally {
         recordCall("outline", Date.now() - t0);
       }

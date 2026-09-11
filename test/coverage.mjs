@@ -294,10 +294,11 @@ describe('findPaths filters: excludes, skips, links', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-  it('a file path as cwd lists nothing instead of throwing', async () => {
+  it('a file path as cwd throws scan root not found', async () => {
     const root = await fixture({ 'a.ts': 'x' });
     try {
-      assert.deepEqual(await search.findPaths('', { cwd: join(root, 'a.ts'), scan: 'mock' }), []);
+      await assert.rejects(search.findPaths('', { cwd: join(root, 'a.ts'), scan: 'mock' }), /scan root not found/);
+      await assert.rejects(search.findPaths('', { cwd: join(root, 'a.ts') }), /scan root not found/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1133,14 +1134,13 @@ describe('fff-ported cases (adapted)', () => {
     }
   });
 
-  it('a missing cwd searches nothing instead of throwing', async () => {
+  it('a missing cwd throws scan root not found', async () => {
     const missing = join(tmpdir(), `omp-find-missing-${process.pid}-xyz`);
     await rm(missing, { recursive: true, force: true });
-    assert.deepEqual(await search.findPaths('anything', { cwd: missing, scan: 'mock' }), []);
-    assert.deepEqual(await search.findPaths('anything', { cwd: missing }), []);
-    const res = await search.grepContents('anything', { cwd: missing, scan: 'mock' });
-    assert.equal(res.total, 0);
-    assert.deepEqual(res.matches, []);
+    await assert.rejects(search.findPaths('anything', { cwd: missing, scan: 'mock' }), /scan root not found/);
+    await assert.rejects(search.findPaths('anything', { cwd: missing }), /scan root not found/);
+    await assert.rejects(search.grepContents('anything', { cwd: missing, scan: 'mock' }), /scan root not found/);
+    await assert.rejects(search.grepContents('anything', { cwd: missing }), /scan root not found/);
   });
 
   it('clearing caches keeps listing working (stateless rescan)', async () => {

@@ -3,6 +3,21 @@
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
 
+## [0.8.2]
+
+### Fixed
+
+- rg per-file runtime failure (numeric exit, e.g. exit 2 from one unscannable file — trailing-dot name, EACCES, broken symlink, FIFO — with `--no-messages` hiding which file) now falls back to the walker instead of killing the whole grep/listing; timeout rejections still rethrow and exit 1 (no matches) never rejects.
+- Walker grep emits one row per match (rg parity) instead of one row per line, for both regex and literal patterns.
+- Walker tracks visited realpaths so a symlink cycle can no longer loop traversal; `MAX_DEPTH=25` still bounds depth.
+- Missing (or file-path) scan root is a clean `scan root not found: <dir>` error instead of a silent zero-state.
+- `structuralGrep` references mode forwards `scan` to the underlying grep, so `scan: "mock"` and walker-forcing reach references search.
+- Backslash path filters normalize to forward slashes before matching, in both the tools-layer filter and the capsule scoping rule.
+- Over-budget grep counts re-fetch the full match set for the per-file summary (unfiltered fetches are paged) and use `1 file` grammar for single-file hits.
+- Frecency writes serialize through an in-process queue, so parallel `recordOpen` calls no longer lose bumps (cross-process stays last-writer-wins).
+- Outline missing-file error collapses raw syscall text + absolute path to the relative display form.
+- Windows EBUSY test-cleanup retry (test-only).
+
 ## [0.8.1]
 
 ### Fixed

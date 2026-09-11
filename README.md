@@ -241,6 +241,16 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 
 `fffind` / `ffgrep` / `ffoutline` / `ffcallers` / `ffstructural` / `ffmap` / `ffcapsule` are always present (`outline`, `structural`, `map`, `capsule` aliases); override mode additionally claims `find` / `grep` (same handlers, where the host allows).
 
+## Honest limits
+
+- Unpinned hidden-file listing differs by backend (rg follows ignore rules; the walker skips dot-dirs outright) — pin an explicit `path` for identical results.
+- `node_modules` pruning is walker-only; rg follows your ignore files instead.
+- Cursors bind to result total + backend, so a compensating add+delete swap between pages reads as unchanged.
+- `ffcapsule` considers the 30 most-mentioned files when hunting a definition.
+- rg row order varies run to run; totals and counts are stable.
+- At most one rotating tip per call, max 3 per tool per process, on non-trivial results only.
+- Frecency writes serialize in-process; across processes the store file is last-writer-wins.
+
 ## Config
 
 Mode precedence, highest first:

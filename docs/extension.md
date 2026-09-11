@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.1). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.2). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -34,7 +34,8 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   `rgGrep`/`fallbackGrep`/`listFiles`: rg gets the pin as its positional path, the
   walker seeds traversal at the pin), so explicitly-pinned hidden/ignored files hit
   on both backends; glob and bare-basename forms keep the post-filter only. Row format
-  `path:line:col: text` (195). Same cursor/error conventions as fffind. Page rows
+  `path:line:col: text` (195); rg row order varies run to run, totals are stable.
+  Same cursor/error conventions as fffind. Page rows
   group by file under `[path#TAG]` hashline headers (`hashlineFileHash` /
   `hashlineHeader` next to `toDisplay`; whole-file tag read once per file per
   call via `hashlineTagsFor`, backend-agnostic; unreadable files render bare).
@@ -82,7 +83,9 @@ Keys normalized to forward slashes (30–32). `recordOpen` bumps count + recency
 `score` decays `count × 0.5^(age/half-life)` (7-day half-life, line 7), unknown paths 0.
 Persist is atomic (sidecar write + fsync, then copyFile over live — never
 rename-over-live on Windows, 45–58). `clear()` drops store + memory cache. Never
-throws (`recordOpen`/`score`/`clear` all swallow).
+throws (`recordOpen`/`score`/`clear` all swallow). Writes serialize through an
+in-process queue (parallel `recordOpen` calls no longer lose bumps); across
+processes the file is last-writer-wins.
 
 ## Pagination
 
@@ -92,13 +95,16 @@ Default 30, max 50, enforced in two places: `numParam` clamps tool params
 200-entry cap with oldest eviction) capturing full query state (query/limit/offset/cwd;
 pattern/literal/ignoreCase/pathFilter/…). Footer when more remain:
 `... (N more; pass cursor "…" for the next page)` (`tools.ts:139–142, 196–201`).
-Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged.
+Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap between pages is invisible to resume.
 
 ## Scan backends
 
 - **Listing** (`listFiles`, `search.ts:92–100`): `rg --files --no-messages
   [--follow|--no-follow]`; on `ENOENT` (rg missing) falls back to `walkFiles`, any
-  other error rethrows. `scan:"mock"` forces the walker (test hook).
+  other error rethrows. `scan:"mock"` forces the walker (test hook). Unpinned
+  hidden-file listing differs by backend (rg follows ignore rules, the walker
+  skips dot-dirs outright), and `node_modules` pruning is walker-only — pin an
+  explicit `path` for identical results.
 - **Walker** (`walkFiles`, 72–91): iterative-depth, `MAX_DEPTH=25`, readdir errors
   swallowed per-dir, symlinks skipped unless `followSymlinks`, skips `node_modules`,
   `.git`, dot-dirs; returns forward-slash relative paths. rg `./` prefixes stripped

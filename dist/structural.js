@@ -180,7 +180,7 @@ export function compileStructural(pattern, opts = {}) {
 }
 export async function structuralGrep(pattern, opts = {}) {
     const compiled = compileStructural(pattern, { language: opts.language });
-    const base = { cwd: opts.cwd, ignoreCase: opts.ignoreCase ?? false, followSymlinks: opts.followSymlinks, timeoutMs: opts.timeoutMs };
+    const base = { cwd: opts.cwd, ignoreCase: opts.ignoreCase ?? false, scan: opts.scan, followSymlinks: opts.followSymlinks, timeoutMs: opts.timeoutMs };
     // Context keys only travel when set: absence keeps the core call identical.
     if ((opts.contextBefore ?? 0) > 0)
         base.contextBefore = opts.contextBefore;

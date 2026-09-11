@@ -75,6 +75,26 @@ function guardCwd(cwd: string): void {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
   if (home && path.resolve(home) === cwd) throw new Error(`refusing to scan the home directory (${cwd}); run from a project directory`);
 }
+/** Nonexistent scan root → clean error instead of silent zero-state (rg spawn
+ * fails → walker readdir catch → []). Thrown before any backend runs; the tools
+ * layer surfaces it as `<tool> failed: scan root not found: <dir>`. */
+async function assertCwdExists(cwd: string): Promise<void> {
+  try {
+    const st = await fs.stat(cwd);
+    if (!st.isDirectory()) throw new Error(`scan root not found: ${cwd}`);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("scan root not found")) throw err;
+    throw new Error(`scan root not found: ${cwd}`);
+  }
+}
+/** rg missing (ENOENT) or rg per-file runtime failure (numeric exit, e.g. exit 2
+ * from one unscannable file — trailing-dot name, EACCES, broken symlink, FIFO —
+ * with --no-messages hiding which file) → walker fallback. Timeout rejections
+ * carry no code and rethrow; rg exit 1 (no matches) never rejects. */
+function rgRecoverable(err: unknown): boolean {
+  const c = errCode(err);
+  return c === "ENOENT" || typeof c === "number";
+}
 /** Cooperative deadline: the timeout race already rejected, so stop burning CPU
 after the budget (rg is kill-guarded; the walker is not). Throws timeout text. */
 function checkDeadline(deadline: number, timeoutMs: number): void {
@@ -95,10 +115,16 @@ function normalizeScope(scope: string | undefined): string | undefined {
 }
 async function walkFiles(cwd: string, follow: boolean, deadline = 0, timeoutMs = 0, scope?: string): Promise<string[]> {
   const out: string[] = [];
+  const visited = new Set<string>();
   async function walk(dir: string, rel: string, depth: number): Promise<void> {
     if (depth > MAX_DEPTH) return;
+    const abs = path.join(cwd, dir);
+    let key: string;
+    try { key = await fs.realpath(abs); } catch { key = path.resolve(abs); }
+    if (visited.has(key)) return;
+    visited.add(key);
     let entries;
-    try { entries = await fs.readdir(path.join(cwd, dir), { withFileTypes: true }); } catch { return; }
+    try { entries = await fs.readdir(abs, { withFileTypes: true }); } catch { return; }
     checkDeadline(deadline, timeoutMs); // per directory batch: abort the orphaned scan, don't finish the tree
     for (const e of entries) {
       if (e.isSymbolicLink() && !follow) continue;
@@ -135,7 +161,7 @@ async function listFiles(cwd: string, scan: string | undefined, follow: boolean,
       // argv ("." root, no blanket --hidden/--no-ignore) byte-identical.
       const stdout = await runCmd("rg", ["--files", "--no-messages", follow ? "--follow" : "--no-follow", root === undefined ? "." : toNative(root)], cwd);
       return { files: stdout.split("\n").map((l) => stripDotSlash(l.trim().replace(/\\/g, "/"))).filter(Boolean), backend: "rg" };
-    } catch (err) { if (errCode(err) !== "ENOENT") throw err; }
+    } catch (err) { if (!rgRecoverable(err)) throw err; }
   }
   return { files: await walkFiles(cwd, follow, 0, 0, root), backend: "walker" };
 }
@@ -196,6 +222,7 @@ const stripDotSlash = (p: string): string => p.startsWith("./") ? p.slice(2) : p
 export async function findScanned(query: string, opts: FindOptions = {}): Promise<FindScan> {
   const cwd = path.resolve(opts.cwd ?? process.cwd());
   guardCwd(cwd);
+  await assertCwdExists(cwd);
   const q = parseFindQuery(query);
   const { files, backend } = await listFiles(cwd, opts.scan, opts.followSymlinks ?? false, opts.scope);
   let modified: Set<string> | null = null;
@@ -237,7 +264,8 @@ async function fallbackGrep(cwd: string, pattern: string, literal: boolean, igno
     // Whole words need a regex even for literal patterns (escape first, then
     // wrap); a bare regex pattern wraps as-is. ASCII \b: patterns that start
     // or end with a non-word char may not match — same as rg -w.
-    try { re = new RegExp(wholeWord ? `\\b(?:${literal ? escapeRegExp(pattern) : pattern})\\b` : pattern, ignoreCase ? "i" : ""); } catch { throw new Error(`invalid regex: ${pattern}`); }
+    // Global flag: one row per MATCH (rg parity), not one row per line.
+    try { re = new RegExp(wholeWord ? `\\b(?:${literal ? escapeRegExp(pattern) : pattern})\\b` : pattern, ignoreCase ? "gi" : "g"); } catch { throw new Error(`invalid regex: ${pattern}`); }
   }
   const needle = ignoreCase ? pattern.toLowerCase() : pattern;
   const out: GrepMatch[] = [];
@@ -252,18 +280,27 @@ async function fallbackGrep(cwd: string, pattern: string, literal: boolean, igno
     } catch { continue; }
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
-      let col = -1;
+      const snippet = lines[i].trim().slice(0, 500);
       if (re) {
         re.lastIndex = 0;
-        const m = re.exec(lines[i]);
-        if (m?.[0] !== undefined) col = (m.index ?? 0) + 1;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(lines[i])) !== null) {
+          if (m[0] === "") { re.lastIndex = m.index + 1; if (re.lastIndex > lines[i].length) break; continue; }
+          out.push({ path: toNative(f), line: i + 1, col: m.index + 1, text: snippet });
+          if (out.length >= GREP_CAP) return out;
+          if (re.lastIndex === m.index) re.lastIndex++; // zero-length guard
+        }
       } else {
-        const idx = (ignoreCase ? lines[i].toLowerCase() : lines[i]).indexOf(needle);
-        if (idx >= 0) col = idx + 1;
-      }
-      if (col > 0) {
-        out.push({ path: toNative(f), line: i + 1, col, text: lines[i].trim().slice(0, 500) });
-        if (out.length >= GREP_CAP) return out;
+        const hay = ignoreCase ? lines[i].toLowerCase() : lines[i];
+        let from = 0;
+        for (;;) {
+          const idx = hay.indexOf(needle, from);
+          if (idx < 0) break;
+          out.push({ path: toNative(f), line: i + 1, col: idx + 1, text: snippet });
+          if (out.length >= GREP_CAP) return out;
+          from = idx + (needle.length > 0 ? needle.length : 1);
+          if (from > hay.length) break;
+        }
       }
     }
   }
@@ -328,6 +365,7 @@ export async function attachEnclosing(cwdDir: string | undefined, matches: GrepM
 export async function grepContents(pattern: string, opts: GrepOptions = {}): Promise<GrepResult> {
   const cwd = path.resolve(opts.cwd ?? process.cwd());
   guardCwd(cwd);
+  await assertCwdExists(cwd);
   if (!pattern) throw new Error("grep pattern must not be empty");
   const literal = opts.literal ?? true;
   if (!literal) { try { new RegExp(pattern); } catch { throw new Error(`invalid regex: ${pattern}`); } }
@@ -346,7 +384,7 @@ export async function grepContents(pattern: string, opts: GrepOptions = {}): Pro
     else {
       try { matches = await rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord, opts.scope); backend = "rg"; }
       catch (err) {
-        if (errCode(err) !== "ENOENT") throw err;
+        if (!rgRecoverable(err)) throw err;
         matches = await fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline, timeoutMs, wholeWord, opts.scope); backend = "walker";
       }
     }
@@ -433,6 +471,7 @@ scope. Default 1 keeps the single-ring shape. */
 export async function callersOf(symbol: string, opts: CallersOptions = {}): Promise<GrepResult> {
   const cwd = path.resolve(opts.cwd ?? process.cwd());
   guardCwd(cwd);
+  await assertCwdExists(cwd);
   if (!symbol) throw new Error("callers symbol must not be empty");
   const depth = opts.depth === 2 ? 2 : opts.depth === 3 ? 3 : 1;
   const seen = new Map<string, GrepMatch>();
@@ -468,7 +507,8 @@ export async function callersOf(symbol: string, opts: CallersOptions = {}): Prom
 /** Tools-side path rule mirrored for capsule scoping (dir/ prefix, glob, or bare name). */
 function matchPathFilter(p: string, filter: string): boolean {
   const d = p.replace(/\\/g, "/");
-  const f = filter.startsWith("./") ? filter.slice(2) : filter;
+  const flat = filter.replace(/\\/g, "/");
+  const f = flat.startsWith("./") ? flat.slice(2) : flat;
   if (f.endsWith("/")) {
     const dir = f.slice(0, -1);
     return d === dir || d.startsWith(`${dir}/`);
@@ -512,6 +552,7 @@ function fileKeyOf(p: string): string {
 export async function rankMap(opts: MapOptions = {}): Promise<MapResult> {
   const cwd = path.resolve(opts.cwd ?? process.cwd());
   guardCwd(cwd);
+  await assertCwdExists(cwd);
   const { files, backend } = await listFiles(cwd, opts.scan, opts.followSymlinks ?? false);
   const modified = await gitModifiedSet(cwd);
   const importers = new Map<string, Set<string>>();
@@ -563,6 +604,7 @@ export interface CapsuleOptions { cwd?: string; ignoreCase?: boolean; pathFilter
 export async function capsuleOf(symbol: string, opts: CapsuleOptions = {}): Promise<CapsuleResult> {
   const cwd = path.resolve(opts.cwd ?? process.cwd());
   guardCwd(cwd);
+  await assertCwdExists(cwd);
   if (!symbol) throw new Error("capsule symbol must not be empty");
   const ignoreCase = opts.ignoreCase ?? false;
   const eq = (a: string, b: string): boolean => ignoreCase ? a.toLowerCase() === b.toLowerCase() : a === b;

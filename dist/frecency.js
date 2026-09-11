@@ -51,17 +51,29 @@ async function save(store, file) {
     await fs.promises.copyFile(tmp, file);
     await fs.promises.rm(tmp, { force: true });
 }
+/** In-process write queue: parallel recordOpen calls otherwise race load→bump→save
+ * (each loads a fresh store before the other saves) and all but one bump is lost.
+ * Chained so every write sees the previous write's store. Cross-process stays
+ * best-effort (last writer wins); documented in README + docs/extension.md. */
+let writeQueue = Promise.resolve();
+function enqueueWrite(work) {
+    const run = writeQueue.then(work, work);
+    writeQueue = run.then(undefined, () => undefined);
+    return run;
+}
 /** Append-on-open: bump count + recency for a path. Never throws. */
 export async function recordOpen(p) {
-    try {
-        const file = storePath();
-        const store = await load(file);
-        const key = keyOf(p);
-        const prev = store.entries[key];
-        store.entries[key] = { count: (prev?.count ?? 0) + 1, last: Date.now() };
-        await save(store, file);
-    }
-    catch { /* frecency tracking never breaks a session */ }
+    return enqueueWrite(async () => {
+        try {
+            const file = storePath();
+            const store = await load(file);
+            const key = keyOf(p);
+            const prev = store.entries[key];
+            store.entries[key] = { count: (prev?.count ?? 0) + 1, last: Date.now() };
+            await save(store, file);
+        }
+        catch { /* frecency tracking never breaks a session */ }
+    });
 }
 /** Decay-on-read: count × 0.5^(age/half-life). Unknown paths score 0. Never throws. */
 export async function score(p) {
@@ -90,10 +102,12 @@ export function status() {
 }
 /** Drop the persisted store + memory cache (for `/find-rescan`). Never throws. */
 export async function clear() {
-    try {
-        const next = fresh();
-        cache = next;
-        await save(next, storePath());
-    }
-    catch { /* best-effort */ }
+    return enqueueWrite(async () => {
+        try {
+            const next = fresh();
+            cache = next;
+            await save(next, storePath());
+        }
+        catch { /* best-effort */ }
+    });
 }
