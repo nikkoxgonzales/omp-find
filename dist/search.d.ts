@@ -70,6 +70,10 @@ export declare function fuzzyScore(pattern: string, target: string): number;
 export declare function findScanned(query: string, opts?: FindOptions): Promise<FindScan>;
 /** Ranked file paths (workspace-relative, native separators), paged by limit/offset. */
 export declare function findPaths(query: string, opts?: FindOptions): Promise<string[]>;
+/** Regex walk+scan shared by the worker thread (grep-worker.ts imports this).
+ * Exported for the worker and for tests comparing worker output to the inline
+ * scan; not part of the tool contract. */
+export declare function walkerRegexGrep(cwd: string, pattern: string, literal: boolean, ignoreCase: boolean, follow: boolean, deadline?: number, timeoutMs?: number, wholeWord?: boolean, scope?: string): Promise<GrepMatch[]>;
 /** Context window cap: contextBefore/contextAfter clamp to 0..5, default 0. */
 export declare function clampContext(n: number | undefined): number;
 /** Slice ±N surrounding lines onto each match (rg --vimgrep drops -B/-C, so both

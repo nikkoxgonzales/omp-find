@@ -110,9 +110,10 @@ interface ResultDetails { totalMatched: number; totalFiles: number; truncated: b
 function withDetails(t: string, details: ResultDetails): { content: Array<{ type: string; text: string }>; details: ResultDetails } {
   return { ...text(t), details };
 }
-/** pi-fff limit-reached notice, emitted next to our cursor footer when a next page exists. */
+/** pi-fff limit-reached notice, emitted next to our cursor footer when a next page exists.
+ * Points at the cursor, never at a bigger limit — numParam clamps to PAGE_MAX. */
 function limitNotice(limit: number): string {
-  return `${limit} matches limit reached. Use limit=${limit * 2}`;
+  return `${limit} matches limit reached (max ${PAGE_MAX}) — more via cursor`;
 }
 /** gograph query contracts: cursors bind to the fetched snapshot (total + backend).
  * Resume re-fetches and compares; a mismatch returns restart guidance, never a

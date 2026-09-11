@@ -28,7 +28,23 @@ async function load(file) {
     try {
         const raw = await fs.promises.readFile(file, "utf8");
         const parsed = JSON.parse(raw);
-        cache = parsed && typeof parsed.entries === "object" && parsed.entries !== null ? { entries: parsed.entries } : fresh();
+        const entries = {};
+        if (parsed && typeof parsed.entries === "object" && parsed.entries !== null) {
+            // Sanitize persisted entries: a hand-edited/corrupt store can carry
+            // wrong-typed count/last (e.g. strings) that would turn score() into NaN
+            // and poison sort comparators. Coerce via Number(); drop non-finite or
+            // negative-count rows.
+            for (const [k, v] of Object.entries(parsed.entries)) {
+                if (typeof v !== "object" || v === null)
+                    continue;
+                const count = Number(v.count);
+                const last = Number(v.last);
+                if (!Number.isFinite(count) || !Number.isFinite(last) || count < 0)
+                    continue;
+                entries[k] = { count, last };
+            }
+        }
+        cache = { entries };
     }
     catch {
         cache = fresh();
@@ -82,7 +98,8 @@ export async function score(p) {
         const e = store.entries[keyOf(p)];
         if (!e)
             return 0;
-        return e.count * 0.5 ** (Math.max(0, Date.now() - e.last) / HALF_LIFE_MS);
+        const s = e.count * 0.5 ** (Math.max(0, Date.now() - e.last) / HALF_LIFE_MS);
+        return Number.isFinite(s) ? s : 0;
     }
     catch {
         return 0;

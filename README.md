@@ -137,7 +137,7 @@ ffcapsule ("Symbol dossier"; `capsule` alias, always registered)
   maxChars: "Max output chars; caller/import rows shrink to fit, noted when they do"
 Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." / "ffmap failed: ..." / "ffcapsule failed: ..." (no/excess pattern/symbol/references, unknown/expired cursor, non-absolute cwd).
 Stale cursors (tree changed since page 1) return restart guidance as text: "...: results changed since page 1; re-run without cursor".
-Each execute also returns `details: { totalMatched, totalFiles, truncated }` (pi-fff packaging: totals over the full result set, `truncated` when a next page or count-fallback applies); hosts that ignore it see identical text. Paged results add a `"<limit> matches limit reached. Use limit=<2×limit>"` notice next to the cursor footer.
+Each execute also returns `details: { totalMatched, totalFiles, truncated }` (pi-fff packaging: totals over the full result set, `truncated` when a next page or count-fallback applies); hosts that ignore it see identical text. Paged results add a `"<limit> matches limit reached (max 50) — more via cursor"` notice next to the cursor footer.
 ```
 
 ```text
@@ -155,7 +155,7 @@ approx: src/a.ts:3:5:
 + logger.info(thing)
 
 [preview only — nothing was written]
-30 matches limit reached. Use limit=60
+30 matches limit reached (max 50) — more via cursor
 
 > ffgrep { "pattern": "Chat ID (CHT-XXXX from list_chats or search_chats)", "path": "server.py" }
 server.py:42:5: // Chat ID (CHT-XXXX from list_chats or search_chats) ...
@@ -245,7 +245,12 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 
 - Unpinned hidden-file listing differs by backend (rg follows ignore rules; the walker skips dot-dirs outright) — pin an explicit `path` for identical results.
 - `node_modules` pruning is walker-only; rg follows your ignore files instead.
-- Cursors bind to result total + backend, so a compensating add+delete swap between pages reads as unchanged.
+- Cursors bind to result total + backend, so a compensating add+delete swap or rename/content-preserving mutation between pages reads as unchanged and resumes silently.
+- Cursor resume is a stateless re-fetch: resuming the same cursor twice returns the same rows and mints a fresh cursor id each time.
+- The cursor store evicts the oldest entry beyond 200; evicted cursors fail with `unknown or expired cursor`.
+- With `followSymlinks` the walker dedups junction/symlink targets by realpath; `rg --follow` lists each path separately.
+- `rg --max-columns 500` can emit `[Omitted long line with N matches]` as row text on >500-column lines.
+- `timeoutMs` is a core `GrepOptions`/`CallersOptions` knob, not a tool param.
 - `ffcapsule` considers the 30 most-mentioned files when hunting a definition.
 - Grep pages are path/line/col ordered on both backends; totals and counts are stable.
 - At most one rotating tip per call, max 3 per tool per process, on non-trivial results only.

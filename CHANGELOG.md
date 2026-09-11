@@ -2,6 +2,16 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.4]
+
+### Fixed
+
+- Walker regex scan runs in a worker thread: a catastrophic-backtracking pattern (e.g. `(a|a)*b` on long lines) blocked the event loop so `timeoutMs` could never fire — now terminated at the deadline with the same `grep timed out` error; reachable end-to-end via rg-error→walker fallback. Literal scans stay inline (indexOf cannot hang).
+- UTF-16LE/BE+BOM and UTF-8 BOM files decode correctly in the walker (BOM sniff before binary NUL check); UTF-8 BOM no longer shifts line-1 columns by one.
+- Frecency store entries with non-numeric/non-finite count/last are dropped on load; `score()` never returns NaN.
+- Page-limit notice no longer suggests `limit=100` (clamped to 50); it names the cap and points at the cursor.
+- Match row text strips `\r` (\r-only/CRLF files could overwrite terminal rows).
+
 ## [0.8.3]
 
 ### Fixed

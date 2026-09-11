@@ -58,7 +58,7 @@ describe('packaging: details envelope per tool (pi-fff pick 2)', () => {
       const p1 = await pi.tools.get('fffind').execute('t', { pattern: 'ts', cwd: root, limit: 1 });
       assert.equal(detailsOf(p1).totalMatched, 3);
       assert.equal(detailsOf(p1).truncated, true);
-      assert.match(textOf(p1), /1 matches limit reached\. Use limit=2/, 'pi-fff notice beside the cursor footer');
+      assert.match(textOf(p1), /1 matches limit reached \(max 50\) — more via cursor/, 'pi-fff notice beside the cursor footer');
       const c = cursorOf(p1);
       assert.ok(c, 'cursor still advertised');
       const p2 = await pi.tools.get('fffind').execute('t', { cursor: c });
@@ -77,7 +77,7 @@ describe('packaging: details envelope per tool (pi-fff pick 2)', () => {
       assert.deepEqual(detailsOf(full), { totalMatched: 3, totalFiles: 2, truncated: false });
       const p1 = await pi.tools.get('ffgrep').execute('t', { pattern: 'needle', cwd: root, limit: 1 });
       assert.equal(detailsOf(p1).truncated, true);
-      assert.match(textOf(p1), /1 matches limit reached\. Use limit=2/);
+      assert.match(textOf(p1), /1 matches limit reached \(max 50\) — more via cursor/);
       const empty = await pi.tools.get('ffgrep').execute('t', { pattern: 'zz-no-hit', cwd: root });
       assert.deepEqual(detailsOf(empty), { totalMatched: 0, totalFiles: 0, truncated: false });
     } finally {
@@ -101,7 +101,7 @@ describe('packaging: details envelope per tool (pi-fff pick 2)', () => {
       assert.ok(detailsOf(co).totalMatched >= 2, `callers counted: ${JSON.stringify(detailsOf(co))}`);
       assert.ok(detailsOf(co).totalFiles >= 1);
       const paged = await pi.tools.get('ffcallers').execute('t', { symbol: 'topFn', cwd: root, limit: 1 });
-      if (cursorOf(paged)) assert.match(textOf(paged), /1 matches limit reached\. Use limit=2/);
+      if (cursorOf(paged)) assert.match(textOf(paged), /1 matches limit reached \(max 50\) — more via cursor/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -141,6 +141,6 @@ describe('packaging: README agent-sees mirror', () => {
       assert.ok(readme.includes(snippet), `README mirrors ${name} promptSnippet`);
     }
     assert.ok(readme.includes('details'), 'README documents the details envelope');
-    assert.ok(readme.includes('matches limit reached. Use limit='), 'README shows the limit notice');
+    assert.ok(readme.includes('matches limit reached (max 50) — more via cursor'), 'README shows the limit notice');
   });
 });

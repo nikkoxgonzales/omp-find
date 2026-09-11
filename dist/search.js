@@ -2,6 +2,7 @@
 import { execFile, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
 import { outlineFile } from "./outline.js";
 export const PAGE_DEFAULT = 30, PAGE_MAX = 50;
 const RG_BUFFER = 64 * 1024 * 1024, GREP_CAP = 20000, MAX_DEPTH = 25;
@@ -131,6 +132,29 @@ after the budget (rg is kill-guarded; the walker is not). Throws timeout text. *
 function checkDeadline(deadline, timeoutMs) {
     if (deadline > 0 && Date.now() > deadline)
         throw new Error(`grep timed out after ${timeoutMs / 1000}s`);
+}
+/** Decode a scanned file the way rg does: BOM-sniffed UTF-16LE/BE transcode and
+ * UTF-8 BOM strip happen BEFORE the binary check, so the NUL test applies to
+ * decoded text (UTF-16 raw bytes are NUL-dense and would false-positive as
+ * binary). Returns null for binary content; callers still catch stat/read. */
+function decodeGrepText(buf) {
+    let text;
+    if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+        text = buf.toString("utf16le", 2);
+    }
+    else if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+        const swapped = Buffer.from(buf.subarray(2));
+        if (swapped.length % 2 === 1)
+            return null; // odd byte count: malformed UTF-16BE
+        swapped.swap16();
+        text = swapped.toString("utf16le");
+    }
+    else {
+        text = buf.toString("utf8");
+        if (text.charCodeAt(0) === 0xfeff)
+            text = text.slice(1); // UTF-8 BOM: strip so line 1 col 1 matches rg
+    }
+    return text.includes("\0") ? null : text;
 }
 /** Explicit-pin scope: workspace-relative path forwarded from the tools layer
  * (concrete `dir/` or `dir/file` pins only — never globs or bare basenames).
@@ -359,20 +383,90 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, whol
     }
     return out;
 }
-async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline = 0, timeoutMs = 0, wholeWord = false, scope) {
-    let re = null;
-    if (!literal || wholeWord) {
-        // Whole words need a regex even for literal patterns (escape first, then
-        // wrap); a bare regex pattern wraps as-is. ASCII \b: patterns that start
-        // or end with a non-word char may not match — same as rg -w.
-        // Global flag: one row per MATCH (rg parity), not one row per line.
+/** Regex walk+scan shared by the worker thread (grep-worker.ts imports this).
+ * Exported for the worker and for tests comparing worker output to the inline
+ * scan; not part of the tool contract. */
+export async function walkerRegexGrep(cwd, pattern, literal, ignoreCase, follow, deadline = 0, timeoutMs = 0, wholeWord = false, scope) {
+    // Whole words need a regex even for literal patterns (escape first, then
+    // wrap); a bare regex pattern wraps as-is. ASCII \b: patterns that start
+    // or end with a non-word char may not match — same as rg -w.
+    // Global flag: one row per MATCH (rg parity), not one row per line.
+    let re;
+    try {
+        re = new RegExp(wholeWord ? `\\b(?:${literal ? escapeRegExp(pattern) : pattern})\\b` : pattern, ignoreCase ? "gi" : "g");
+    }
+    catch {
+        throw new Error(`invalid regex: ${pattern}`);
+    }
+    const out = [];
+    for (const f of await walkFiles(cwd, follow, deadline, timeoutMs, scope)) {
+        checkDeadline(deadline, timeoutMs); // per file batch: abort the orphaned scan between reads
+        let text;
         try {
-            re = new RegExp(wholeWord ? `\\b(?:${literal ? escapeRegExp(pattern) : pattern})\\b` : pattern, ignoreCase ? "gi" : "g");
+            if ((await fs.stat(path.join(cwd, f))).size > MAX_GREP_BYTES)
+                continue; // oversized skip
+            text = decodeGrepText(await fs.readFile(path.join(cwd, f)));
         }
         catch {
-            throw new Error(`invalid regex: ${pattern}`);
+            continue;
+        }
+        if (text === null)
+            continue; // binary skip
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+            const snippet = lines[i].replace(/\r/g, "").trim().slice(0, 500); // strip \r: \r-only files embed raw CRs that overwrite terminal rows
+            re.lastIndex = 0;
+            let m;
+            while ((m = re.exec(lines[i])) !== null) {
+                if (m[0] === "") {
+                    re.lastIndex = m.index + 1;
+                    if (re.lastIndex > lines[i].length)
+                        break;
+                    continue;
+                }
+                out.push({ path: toNative(f), line: i + 1, col: m.index + 1, text: snippet });
+                if (out.length >= GREP_CAP)
+                    return out;
+                if (re.lastIndex === m.index)
+                    re.lastIndex++; // zero-length guard
+            }
         }
     }
+    return out;
+}
+/** Regex walker scan off-thread: a catastrophic pattern can starve the event
+ * loop, which would keep grepContents' timeout race from ever firing. The
+ * worker is terminated at the deadline; spawn failure propagates as a normal
+ * error — never an inline fallback, which would reintroduce the hang. */
+function workerGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord, scope) {
+    const { promise, resolve, reject } = Promise.withResolvers();
+    const worker = new Worker(new URL("./grep-worker.js", import.meta.url), {
+        workerData: { cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord, scope },
+    });
+    worker.unref(); // a stuck worker must not pin the parent process open
+    let settled = false;
+    const done = (fn) => {
+        if (settled)
+            return;
+        settled = true;
+        clearTimeout(timer);
+        void worker.terminate();
+        fn();
+    };
+    const timer = setTimeout(() => done(() => reject(new Error(`grep timed out after ${timeoutMs / 1000}s`))), timeoutMs);
+    worker.once("message", (msg) => done(() => (msg && typeof msg.error === "string" ? reject(new Error(msg.error)) : resolve(msg?.matches ?? []))));
+    worker.once("error", (err) => done(() => reject(err)));
+    worker.once("exit", (code) => done(() => reject(new Error(`grep worker exited with code ${code}`))));
+    return promise;
+}
+async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline = 0, timeoutMs = 0, wholeWord = false, scope) {
+    if (!literal || wholeWord) {
+        // Regex scan runs in a worker: a catastrophic pattern would otherwise hang
+        // the event loop and the timeout race could never fire. Spawn failure
+        // propagates — silently falling back inline would reintroduce the hang.
+        return workerGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord, scope);
+    }
+    // Literal scan stays inline: indexOf cannot hang, so no worker is needed.
     const needle = ignoreCase ? pattern.toLowerCase() : pattern;
     const out = [];
     for (const f of await walkFiles(cwd, follow, deadline, timeoutMs, scope)) {
@@ -381,48 +475,28 @@ async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline 
         try {
             if ((await fs.stat(path.join(cwd, f))).size > MAX_GREP_BYTES)
                 continue; // oversized skip
-            const buf = await fs.readFile(path.join(cwd, f));
-            if (buf.indexOf(0) >= 0)
-                continue; // binary skip
-            text = buf.toString("utf8");
+            text = decodeGrepText(await fs.readFile(path.join(cwd, f)));
         }
         catch {
             continue;
         }
+        if (text === null)
+            continue; // binary skip
         const lines = text.split("\n");
         for (let i = 0; i < lines.length; i++) {
-            const snippet = lines[i].trim().slice(0, 500);
-            if (re) {
-                re.lastIndex = 0;
-                let m;
-                while ((m = re.exec(lines[i])) !== null) {
-                    if (m[0] === "") {
-                        re.lastIndex = m.index + 1;
-                        if (re.lastIndex > lines[i].length)
-                            break;
-                        continue;
-                    }
-                    out.push({ path: toNative(f), line: i + 1, col: m.index + 1, text: snippet });
-                    if (out.length >= GREP_CAP)
-                        return out;
-                    if (re.lastIndex === m.index)
-                        re.lastIndex++; // zero-length guard
-                }
-            }
-            else {
-                const hay = ignoreCase ? lines[i].toLowerCase() : lines[i];
-                let from = 0;
-                for (;;) {
-                    const idx = hay.indexOf(needle, from);
-                    if (idx < 0)
-                        break;
-                    out.push({ path: toNative(f), line: i + 1, col: idx + 1, text: snippet });
-                    if (out.length >= GREP_CAP)
-                        return out;
-                    from = idx + (needle.length > 0 ? needle.length : 1);
-                    if (from > hay.length)
-                        break;
-                }
+            const snippet = lines[i].replace(/\r/g, "").trim().slice(0, 500); // strip \r: \r-only files embed raw CRs that overwrite terminal rows
+            const hay = ignoreCase ? lines[i].toLowerCase() : lines[i];
+            let from = 0;
+            for (;;) {
+                const idx = hay.indexOf(needle, from);
+                if (idx < 0)
+                    break;
+                out.push({ path: toNative(f), line: i + 1, col: idx + 1, text: snippet });
+                if (out.length >= GREP_CAP)
+                    return out;
+                from = idx + (needle.length > 0 ? needle.length : 1);
+                if (from > hay.length)
+                    break;
             }
         }
     }
@@ -448,10 +522,10 @@ export async function attachContext(cwdDir, matches, before, after) {
             try {
                 if ((await fs.stat(path.join(cwd, m.path))).size > MAX_GREP_BYTES)
                     continue;
-                const buf = await fs.readFile(path.join(cwd, m.path));
-                if (buf.indexOf(0) >= 0)
+                const text = decodeGrepText(await fs.readFile(path.join(cwd, m.path)));
+                if (text === null)
                     continue; // binary skip
-                lines = buf.toString("utf8").split("\n");
+                lines = text.split("\n");
             }
             catch {
                 continue;

@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.3). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.4). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -43,7 +43,7 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
   {totalMatched, totalFiles, truncated}}` (pi-fff packaging; totals over the full
   result set, `truncated` when a next page or count-fallback applies). Each def
   carries a one-line `promptSnippet` (guidelines unchanged); paged results add a
-  `"<limit> matches limit reached. Use limit=<2×limit>"` notice next to the cursor footer.
+  `"<limit> matches limit reached (max 50) — more via cursor"` notice next to the cursor footer.
 - **Override vs additive** (`tools.ts:94–95, 208–213`): `fffind`/`ffgrep` always
   registered; `override` (default) additionally claims `find`/`grep` with the same
   handlers. Dual-arity `register` shim (99–103): single-object if host takes 1 arg,
@@ -95,7 +95,7 @@ Default 30, max 50, enforced in two places: `numParam` clamps tool params
 200-entry cap with oldest eviction) capturing full query state (query/limit/offset/cwd;
 pattern/literal/ignoreCase/pathFilter/…). Footer when more remain:
 `... (N more; pass cursor "…" for the next page)` (`tools.ts:139–142, 196–201`).
-Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap between pages is invisible to resume. Grep pages are path/line/col ordered on both backends.
+Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contracts): resume re-fetches and compares, so a tree change between pages returns `"…: results changed since page 1; re-run without cursor"` instead of a silently shifted page. Cursor id format is unchanged. The snapshot is total + backend only, so a compensating add+delete swap or a rename/content-preserving mutation between pages is invisible to resume. Resume is a stateless re-fetch — resuming the same cursor twice returns the same rows and mints a fresh cursor id each time. Grep pages are path/line/col ordered on both backends.
 
 ## Scan backends
 
@@ -106,17 +106,22 @@ Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contrac
   skips dot-dirs outright), and `node_modules` pruning is walker-only — pin an
   explicit `path` for identical results.
 - **Walker** (`walkFiles`, 72–91): iterative-depth, `MAX_DEPTH=25`, readdir errors
-  swallowed per-dir, symlinks skipped unless `followSymlinks`, skips `node_modules`,
+  swallowed per-dir, symlinks skipped unless `followSymlinks` (followed targets
+  dedup by realpath, so junction/symlink aliases collapse where `rg --follow`
+  lists each path separately), skips `node_modules`,
   `.git`, dot-dirs; returns forward-slash relative paths. rg `./` prefixes stripped
   (96, 149).
 - **Grep** (`rgGrep` 169–181): `rg --vimgrep --no-heading --no-messages --max-columns
   500 --max-filesize 2M`, `--fixed-strings` when literal, `--ignore-case` optional;
-  rows parsed `path:line:col:text`, text trimmed to 500 chars. Fallback (`fallbackGrep`
+  rows parsed `path:line:col:text`, text trimmed to 500 chars. `--max-columns 500`
+  means rg can emit `[Omitted long line with N matches]` as row text on
+  >500-column lines. Fallback (`fallbackGrep`
   182–215): per-file stat skip > 2 MB, NUL-byte binary skip, unreadable files skipped,
   literal `indexOf` or `RegExp` per line, first match col per line, `GREP_CAP=20000`
   hard stop. `grepContents` (216–245): validates non-empty pattern + regex
   compilability up front, rg→fallback on ENOENT, plus a `Promise.race` wall-clock
-  timeout (default 30 s, `timeoutMs` overridable) that rejects `grep timed out after Ns`
+  timeout (default 30 s, `timeoutMs` overridable — a core `GrepOptions` knob, not
+  a tool param) that rejects `grep timed out after Ns`
   even if rg hangs past its own `timeout` kill (`runCmd` 48–59 treats rg exit 1 as
   no-matches, kill as timeout).
 - **Runaway guard** (`guardCwd`, 66–71): refuses filesystem root and home directory
