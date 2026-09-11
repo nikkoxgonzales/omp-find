@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 const HALF_LIFE_MS = 7 * 24 * 3600 * 1000;
 // Null-prototype entries map: `store.entries["__proto__"] = {...}` on a plain
 // object invokes the proto setter and silently drops the key — a path literally
@@ -22,8 +23,49 @@ export function storePath(root = process.cwd()) {
     }
     return path.join(os.homedir(), ".omp", "var", "omp-find", hash, "frecency.json");
 }
+/** Store key for a path both `recordOpen` and `score` see. Canonicalizes so the
+ * many spellings of one file collapse to a single entry:
+ * - selectors are stripped (`:N`, `:N-M`, `:N+M`, `:raw`, `:img`, `:conflicts`,
+ *   `?q=…`, `#tag`) — a `read` of `x.ts:10-20` counts as opening `x.ts`;
+ * - non-file URIs (`xd://`, `artifact://`, `agent://`, `local://`, `skill://`,
+ *   `rule://`, `history://`, `issue://`, `pr://`, `omp://`, `mcp://`, `ssh://`,
+ *   `http(s)://`, …) return NON_FILE — `recordOpen` skips them, `score` is 0;
+ * - `file://` URIs unwrap to their filesystem path;
+ * - separators normalize to `/` and paths inside the project store
+ *   cwd-relative, so `read src/x.ts`, `read C:/repo/src/x.ts`, and the relative
+ *   paths fffind emits all hit the same key. */
+const NON_FILE = "\0";
 function keyOf(p) {
-    return p.replace(/\\/g, "/");
+    // `?q=`/`#tag` selectors first — a URI's own query/fragment goes with the URI.
+    let s = p.replace(/[?#].*$/, "");
+    // `scheme:`/`scheme://` that isn't a one-letter drive (`C:`) isn't a path.
+    const scheme = s.match(/^[A-Za-z][A-Za-z0-9+.-]*:/);
+    if (scheme !== null && scheme[0].length > 2) {
+        if (scheme[0].toLowerCase() !== "file:")
+            return NON_FILE;
+        try {
+            s = fileURLToPath(s);
+        }
+        catch {
+            return NON_FILE;
+        }
+    }
+    s = s.replace(/\\/g, "/");
+    // Trailing `:selector` segments — a `:` past index 1 (the `X:` drive prefix
+    // survives) whose tail is only selector characters (digits, letters, `+`,
+    // `,`, `-`). Loops for stacked selectors like `:raw:2-4`.
+    for (;;) {
+        const i = s.lastIndexOf(":");
+        if (i <= 1 || !/^[A-Za-z0-9+,-]*$/.test(s.slice(i + 1)))
+            break;
+        s = s.slice(0, i);
+    }
+    if (s === "")
+        return NON_FILE;
+    const abs = path.resolve(s);
+    const rel = path.relative(process.cwd(), abs);
+    const inside = rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+    return (inside ? rel : abs).replace(/\\/g, "/");
 }
 /** Read + sanitize the store file straight from disk (no cache). Never throws:
  * missing/corrupt files return a fresh store. */
@@ -129,6 +171,8 @@ export async function recordOpen(p) {
             const file = storePath();
             const store = await load(file);
             const key = keyOf(p);
+            if (key === NON_FILE)
+                return; // non-file URI — don't write noise
             const prev = store.entries[key];
             store.entries[key] = { count: (prev?.count ?? 0) + 1, last: Date.now() };
             await save(store, file, true);
@@ -140,7 +184,10 @@ export async function recordOpen(p) {
 export async function score(p) {
     try {
         const store = await load(storePath());
-        const e = store.entries[keyOf(p)];
+        const key = keyOf(p);
+        if (key === NON_FILE)
+            return 0;
+        const e = store.entries[key];
         if (!e)
             return 0;
         const s = e.count * 0.5 ** (Math.max(0, Date.now() - e.last) / HALF_LIFE_MS);

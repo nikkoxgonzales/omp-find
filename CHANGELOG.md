@@ -2,6 +2,12 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.9]
+
+### Fixed
+
+- Frecency keys are canonicalized — `read`/`edit`/`write` paths with `:line-range`/`?q=`/`#tag` selectors and non-file URIs (`xd://`, `agent://`, …) previously stored keys `score()` could never match, so ranking still couldn't move despite the 0.8.8 wiring. Paths now strip selectors, skip non-file URIs, and store cwd-relative inside the project — `read src/x.ts` and `read C:/repo/src/x.ts` hit the same key.
+
 ## [0.8.8]
 
 ### Fixed

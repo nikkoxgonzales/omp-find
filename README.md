@@ -273,6 +273,7 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 - Cursor resume runs on page-1 params: extra params passed alongside `cursor` are ignored and flagged with a `note: cursor params in effect (…)` line.
 - Loading the extension twice shares one module graph — cursor store, session stats, and the frecency cache are process-global, so a `/find-rescan` in one load clears both.
 - Frecency `clear()` stamps a `clearedAt` tombstone; merge-on-save drops entries older than it, so a stale process can't resurrect cleared keys.
+- Frecency keys are canonicalized before storing/lookup: `read`-style selectors (`:10-20`, `:raw`, `?q=`, `#tag`) are stripped, non-file URIs (`xd://`, `artifact://`, `https://`, …) are skipped, and paths inside the project store cwd-relative — so `read src/x.ts` and `read C:/repo/src/x.ts` hit one key.
 - `ffcallers` `depth` 2|3 fetches each BFS ring in parallel — transitive depth costs one round-trip per ring, not per symbol.
 - `ffoutline` covers `export async function` declarations alongside plain `function`.
 - `ffstructural` `inside:`/`has:` take one `OUTER >> INNER` / `OUTER << INNER` pair — chained combinators (`inside: a >> b >> c`) are rejected, not nested.

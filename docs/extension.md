@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.8). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.9). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -9,7 +9,7 @@ Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json
 |---|---|
 | `src/search.ts` (337 lines) | `parseFindQuery`, `globToRegExp`, `findPaths`, `grepContents`, `warmScan`, `status`, `clearCache`; consts `PAGE_DEFAULT=30`, `PAGE_MAX=50` (line 5), `RG_BUFFER=64MB`, `GREP_CAP=20000`, `MAX_DEPTH=25` (line 6), `MAX_GREP_BYTES=2MB` / `MAX_GREP_SIZE="2M"` (8), `GREP_TIMEOUT_DEFAULT=30000` (10) |
 | `src/tools.ts` (~1300 lines) | `resolveFindMode`, `registerFindTools`, cursor store (`cursors`, `storeCursor`, 200-entry cap), `applyPathFilter`, `strictStrParam`/`numParam` param validation, `safeRecordOpen` |
-| `src/frecency.ts` (~100 lines) | `storePath`, `recordOpen`, `score`, `status`, `clear`; `HALF_LIFE_MS` 7 days (line 7) |
+| `src/frecency.ts` (~210 lines) | `storePath`, `keyOf`, `recordOpen`, `score`, `status`, `clear`; `HALF_LIFE_MS` 7 days (line 8) |
 | `src/extension.ts` (~62 lines) | Default-export factory; static imports (fail loudly at load); `session_start` warm scan; `tool_result` frecency feed (read/edit/write opens) |
 | `src/commands.ts` (~92 lines) | `/find-health`, `/find-rescan` via deps bag |
 | `test/find.mjs` | node:test suite (`npm test` = `tsc` build + `node --test`) |
@@ -79,8 +79,11 @@ and is reserved for future tools so the default stays lean.
 
 Per-project JSON (`frecency.ts:20–28`): `%LOCALAPPDATA%/omp-find` on win32, else
 `~/.omp/var/omp-find`, keyed by 16-hex-char sha1 of resolved cwd (`projectHash`, 16–18).
-Keys normalized to forward slashes (30–32). `recordOpen` bumps count + recency —
-fed by the extension's `tool_result` hook (successful `read`/`edit`/`write`
+Keys canonicalized in `keyOf` (45–69): selectors stripped (`:N`, `:N-M`, `:raw`,
+`?q=`, `#tag`), non-file URIs (`xd://`, `artifact://`, `https://`, …) skipped,
+`file://` unwrapped, separators `/`, cwd-relative when inside the project.
+`recordOpen` bumps count + recency — fed by the extension's `tool_result` hook
+(successful `read`/`edit`/`write`
 results with a string `input.path`) and by the tools layer itself (`ffoutline`
 records its file, `ffcapsule` records the resolved def file — both
 fire-and-forget via `safeRecordOpen`).
