@@ -50,6 +50,7 @@ export interface GrepResult {
     matches: GrepMatch[];
     total: number;
     backend: ScanBackend;
+    capped?: boolean;
 }
 /** Which listing/grep backend served a call: rg when on PATH, otherwise the builtin walker. */
 export type ScanBackend = "rg" | "walker";

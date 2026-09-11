@@ -1,7 +1,7 @@
 # omp-find extension — as-built reference
 
 Grounds every claim in `src/*.ts`, `package.json`, `.omp-plugin/marketplace.json`,
-`README.md` (v0.8.4). No proposals here — see `serena-findings.md` / `fff-findings.md`.
+`README.md` (v0.8.5). No proposals here — see `serena-findings.md` / `fff-findings.md`.
 
 ## Layout
 
@@ -85,7 +85,9 @@ Persist is atomic (sidecar write + fsync, then copyFile over live — never
 rename-over-live on Windows, 45–58). `clear()` drops store + memory cache. Never
 throws (`recordOpen`/`score`/`clear` all swallow). Writes serialize through an
 in-process queue (parallel `recordOpen` calls no longer lose bumps); across
-processes the file is last-writer-wins.
+processes each save re-reads the file and merges per key (max count, max last)
+instead of last-writer-wins — no lock, so simultaneous same-key bumps can
+still under-count.
 
 ## Pagination
 
@@ -109,7 +111,8 @@ Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contrac
   swallowed per-dir, symlinks skipped unless `followSymlinks` (followed targets
   dedup by realpath, so junction/symlink aliases collapse where `rg --follow`
   lists each path separately), skips `node_modules`,
-  `.git`, dot-dirs; returns forward-slash relative paths. rg `./` prefixes stripped
+  `.git`, dot-dirs (`.git` pointer files — worktree/submodule `.git` files —
+  skipped too); returns forward-slash relative paths. rg `./` prefixes stripped
   (96, 149).
 - **Grep** (`rgGrep` 169–181): `rg --vimgrep --no-heading --no-messages --max-columns
   500 --max-filesize 2M`, `--fixed-strings` when literal, `--ignore-case` optional;
@@ -118,17 +121,22 @@ Cursors bind to the fetched snapshot (`total` + `backend`, gograph query contrac
   >500-column lines. Fallback (`fallbackGrep`
   182–215): per-file stat skip > 2 MB, NUL-byte binary skip, unreadable files skipped,
   literal `indexOf` or `RegExp` per line, first match col per line, `GREP_CAP=20000`
-  hard stop. `grepContents` (216–245): validates non-empty pattern + regex
+  hard stop on both backends — surfaced as `capped: true` on `GrepResult`, which
+  tools render as `N+` totals plus a `capped` note. `grepContents` (216–245): validates non-empty pattern + regex
   compilability up front, rg→fallback on ENOENT, plus a `Promise.race` wall-clock
   timeout (default 30 s, `timeoutMs` overridable — a core `GrepOptions` knob, not
   a tool param) that rejects `grep timed out after Ns`
   even if rg hangs past its own `timeout` kill (`runCmd` 48–59 treats rg exit 1 as
-  no-matches, kill as timeout).
+  no-matches, kill as timeout). `wholeWord` wraps patterns in identifier
+  boundaries on both backends (`$`/`_` count as word chars, so patterns
+  starting/ending with a non-word char may not match); `\p{...}` unicode
+  property escapes work on the walker too, not just rg.
 - **Runaway guard** (`guardCwd`, 66–71): refuses filesystem root and home directory
   (via `HOME`/`USERPROFILE`) for both find and grep.
 - **git:modified** (`gitModifiedSet`, 101–115): fresh `git status --porcelain` per call;
-  parses rename arrows + quoted paths; null when git fails (not a repo) →
-  `findPaths` throws `git:modified requires a git repository` (159).
+  parses rename arrows + quoted paths; null when git fails → `findPaths` throws
+  `git:modified requires a git repository (git status failed)`, or
+  `git:modified needs a worktree (bare repository)` when `rev-parse --is-bare-repository` says bare.
 - **Ranking** (`findPaths` 151–168): `applyFindFilters` (120–131: dirPrefix, globs
   matched against full path *or* basename via `matchesAny`, excludes as dir-/glob-/
   exact-/segment-match, modified-set intersection) → `fuzzyScore` (133–146:
@@ -214,7 +222,8 @@ counts, grep/callers/structural→per-file counts, outline→kind counts) comple
   `clampContext`, default 0); `GrepMatch.before/after`; `attachContext` slices
   file lines (each file read once) for BOTH backends — `rg --vimgrep` silently
   drops `-B`/`-C`, so no `-B`/`-C` is passed. Context rows render indented
-  without a column (`  path:line: text`); cursor state carries the windows.
+  without a column (`  path:line: text`), per match — overlapping windows
+  repeat per match instead of merging like `rg -C`; cursor state carries the windows.
   `GrepOptions.expand?: "none"|"function"` (default `none`) runs the
   `attachEnclosing` post-pass — one depth-0 `outlineFile` per file-with-hits on
   the page only — attributing each match to the nearest symbol at/above its

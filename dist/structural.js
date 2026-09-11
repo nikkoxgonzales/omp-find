@@ -92,7 +92,12 @@ const KIND_PATTERNS = {
     return: "^\\s*return\\b",
 };
 function defPattern(name) {
-    return `^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+|abstract\\s+)*(?:function|def|fn|func|class|struct|enum|interface|trait|type|const|let|var)\\s+${escapeRegExp(name)}\\b`;
+    // Edge-conditional boundary: \b when the name ends in a word char (rg-compatible);
+    // a [\w$] lookaround otherwise — $ is an identifier char, so `foo` must not
+    // match `foo$bar` and `foo$` must still resolve (walker serves those patterns).
+    const esc = escapeRegExp(name);
+    const right = /[\w$]$/.test(esc) ? "\\b" : "(?![\\w$])";
+    return `^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+|abstract\\s+)*(?:function|def|fn|func|class|struct|enum|interface|trait|type|const|let|var)\\s+${esc}${right}`;
 }
 /** Alias map to the outline.ts language families; unknown input stays generic
 (the atom is shared, so nothing throws on a new language). */
@@ -197,10 +202,10 @@ export async function structuralGrep(pattern, opts = {}) {
         const files = new Set(outerRes.matches.map((m) => m.path));
         const innerRes = await grepContents(compiled.regex, { ...base, scan, literal: false });
         const matches = innerRes.matches.filter((m) => files.has(m.path));
-        return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend: innerRes.backend };
+        return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend: innerRes.backend, capped: innerRes.capped };
     }
     const res = await grepContents(compiled.regex, { ...base, scan, literal: false });
-    return { matches: pageOf(res.matches, opts.limit, opts.offset), total: res.total, backend: res.backend };
+    return { matches: pageOf(res.matches, opts.limit, opts.offset), total: res.total, backend: res.backend, capped: res.capped };
 }
 /** Preview a rewrite template against matches: `$NAME` (and `$$$NAME`) slots
 fill from first-occurrence capture groups; unknown slots stay literal. Pure

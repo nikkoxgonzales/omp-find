@@ -106,7 +106,7 @@ function text(t: string): { content: Array<{ type: string; text: string }> } {
   return { content: [{ type: "text", text: t }] };
 }
 /** pi-fff packaging: every execute returns {content, details} — hosts ignoring details see identical text. */
-interface ResultDetails { totalMatched: number; totalFiles: number; truncated: boolean }
+interface ResultDetails { totalMatched: number; totalFiles: number; truncated: boolean; capped?: boolean }
 function withDetails(t: string, details: ResultDetails): { content: Array<{ type: string; text: string }>; details: ResultDetails } {
   return { ...text(t), details };
 }
@@ -623,6 +623,10 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const pool = pathFilter ? applyPathFilter(res.matches.map((m) => m.path), pathFilter, search.globToRegExp) : null;
         const matches = pool === null ? res.matches : res.matches.filter((m) => pool.includes(m.path));
         const total = pool === null ? res.total : matches.length;
+        // GREP_CAP lower bound: when the core capped the match set, totals render
+        // as `N+` with a `capped` note. `in`-check keeps this compiling against
+        // cores that predate the flag.
+        const capped = "capped" in res && res.capped === true;
         const liveBackend = typeof res.backend === "string" ? res.backend : undefined;
         statBackend = liveBackend;
         if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend })) return staleCursor(toolName);
@@ -665,7 +669,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           const byFile = new Map<string, number>();
           for (const m of counted) byFile.set(toDisplay(m.path), (byFile.get(toDisplay(m.path)) ?? 0) + 1);
           const fileWord = byFile.size === 1 ? "file" : "files";
-          return withDetails(`Matched ${total} hits in ${byFile.size} ${fileWord} (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
+          return withDetails(`Matched ${total}${capped ? "+" : ""} hits in ${byFile.size} ${fileWord} (output exceeds ${maxChars} chars${capped ? ", capped" : ""}). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true, ...(capped ? { capped: true } : {}) });
         }
         const tags = await hashlineTagsFor(cwd, page.map((m) => m.path));
         const lines = groupGrepBlocks(blocks, tags);
@@ -673,17 +677,17 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
           const backend = typeof res.backend === "string" ? res.backend : undefined;
           return withDetails(backend !== undefined ? `0 matches for "${pattern}" (${backend})` : `0 matches for "${pattern}"`, { totalMatched: 0, totalFiles: 0, truncated: false });
         }
-        lines.push(`(${total} match${total === 1 ? "" : "es"} total)`);
+        lines.push(`(${total}${capped ? "+" : ""} match${total === 1 ? "" : "es"} total${capped ? ", capped" : ""})`);
         if (!concise) lines.push(...nudge("grep", total));
         const hasMore = offset + page.length < total;
-        const details = { totalMatched: total, totalFiles: new Set(matches.map((m) => m.path)).size, truncated: hasMore };
+        const details = { totalMatched: total, totalFiles: new Set(matches.map((m) => m.path)).size, truncated: hasMore, ...(capped ? { capped: true } : {}) };
         if (hasMore) {
           const next = storeCursor(scope === undefined ? {
             kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
           } : {
             kind: "grep", pattern, literal, ignoreCase, wholeWord, smartCase, pathFilter, scope, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, expand, maxChars, concise, total, backend: liveBackend,
           });
-          lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+          lines.push("", `... (${total - offset - page.length}${capped ? "+" : ""} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
         }
         return withDetails(lines.join("\n"), details);
       } catch (err) {
@@ -829,6 +833,9 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         ranked.sort((a, b) => b.s - a.s); // stable: frecency first, path order otherwise
         const total = ranked.length;
         const liveBackend = typeof res.backend === "string" ? res.backend : undefined;
+        // GREP_CAP lower bound on the underlying match set: filtered totals are
+        // still lower bounds, so render `N+` + `capped` when the core capped.
+        const capped = "capped" in res && res.capped === true;
         statBackend = liveBackend;
         if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend })) return staleCursor(toolName);
         const page = ranked.slice(offset, offset + limit);
@@ -836,16 +843,16 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         if (total > 0 && overBudget(lines.join("\n"), maxChars)) {
           const byFile = new Map<string, number>();
           for (const r of ranked) byFile.set(toDisplay(r.m.path), (byFile.get(toDisplay(r.m.path)) ?? 0) + 1);
-          return withDetails(`Matched ${total} approximate references to ${symbol} in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
+          return withDetails(`Matched ${total}${capped ? "+" : ""} approximate references to ${symbol} in ${byFile.size} files (output exceeds ${maxChars} chars${capped ? ", capped" : ""}). Per-file counts: ${countSummary([...byFile])}. Refine path or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true, ...(capped ? { capped: true } : {}) });
         }
         if (!exactOnly && total > 0 && certain.length > 0 && !certain.some((m) => callerCertainty(m.via ?? symbol, m.text, ignoreCase) === "exact")) {
-          lines.unshift(`note: no exact call/import sites for "${symbol}"; ${total} possible mention${total === 1 ? "" : "s"} — confirm with read`, "");
+          lines.unshift(`note: no exact call/import sites for "${symbol}"; ${total}${capped ? "+" : ""} possible mention${total === 1 ? "" : "s"} — confirm with read`, "");
         }
         const hasMore = offset + page.length < total;
-        const details = { totalMatched: total, totalFiles: new Set(certain.map((m) => m.path)).size, truncated: hasMore };
+        const details = { totalMatched: total, totalFiles: new Set(certain.map((m) => m.path)).size, truncated: hasMore, ...(capped ? { capped: true } : {}) };
         if (hasMore) {
           const next = storeCursor({ kind: "callers", symbol, ignoreCase, pathFilter, exactOnly, depth, limit, nextOffset: offset + page.length, cwd, maxChars, total, backend: liveBackend });
-          lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+          lines.push("", `... (${total - offset - page.length}${capped ? "+" : ""} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
         }
         return withDetails(lines.length > 0 ? lines.join("\n") : `No approximate references to ${symbol} found`, details);
       } catch (err) {
@@ -927,6 +934,9 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         ranked.sort((a, b) => b.s - a.s); // stable: frecency first, scan order otherwise
         const total = ranked.length;
         const liveBackend = typeof res.backend === "string" ? res.backend : undefined;
+        // GREP_CAP lower bound on the underlying match set: filtered totals are
+        // still lower bounds, so render `N+` + `capped` when the core capped.
+        const capped = "capped" in res && res.capped === true;
         statBackend = liveBackend;
         if (bound !== undefined && snapshotMismatch(bound, { total, backend: liveBackend })) return staleCursor(toolName);
         const page = ranked.slice(offset, offset + limit);
@@ -943,16 +953,16 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         if (total > 0 && overBudget(lines.join("\n"), maxChars)) {
           const byFile = new Map<string, number>();
           for (const r of ranked) byFile.set(toDisplay(r.m.path), (byFile.get(toDisplay(r.m.path)) ?? 0) + 1);
-          return withDetails(`Matched ${total} approximate structural hits in ${byFile.size} files (output exceeds ${maxChars} chars). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true });
+          return withDetails(`Matched ${total}${capped ? "+" : ""} approximate structural hits in ${byFile.size} files (output exceeds ${maxChars} chars${capped ? ", capped" : ""}). Per-file counts: ${countSummary([...byFile])}. Refine path/pattern or raise maxChars.`, { totalMatched: total, totalFiles: byFile.size, truncated: true, ...(capped ? { capped: true } : {}) });
         }
         if (lines.length === 0) {
           return text(backend !== undefined ? `0 structural matches for "${query}" (${backend})` : `0 structural matches for "${query}"`);
         }
         const hasMore = offset + page.length < total;
-        const details = { totalMatched: total, totalFiles: new Set(filtered.map((m) => m.path)).size, truncated: hasMore };
+        const details = { totalMatched: total, totalFiles: new Set(filtered.map((m) => m.path)).size, truncated: hasMore, ...(capped ? { capped: true } : {}) };
         if (hasMore) {
           const next = storeCursor({ kind: "structural", query, language, ignoreCase, pathFilter, rewrite, limit, nextOffset: offset + page.length, cwd, contextBefore, contextAfter, maxChars, total, backend: liveBackend });
-          lines.push("", `... (${total - offset - page.length} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
+          lines.push("", `... (${total - offset - page.length}${capped ? "+" : ""} more; pass cursor "${next}" for the next page)`, limitNotice(limit));
         }
         return withDetails(lines.join("\n"), details);
       } catch (err) {

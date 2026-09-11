@@ -214,8 +214,8 @@ async function walkFiles(cwd, follow, deadline = 0, timeoutMs = 0, scope) {
                 if (e.name !== "node_modules" && e.name !== ".git" && !e.name.startsWith("."))
                     await walk(path.join(dir, e.name), relPath, depth + 1);
             }
-            else
-                out.push(relPath);
+            else if (e.name !== ".git")
+                out.push(relPath); // linked worktrees carry a .git pointer FILE — skip it like the dir
         }
     }
     const root = normalizeScope(scope);
@@ -346,8 +346,15 @@ export async function findScanned(query, opts = {}) {
     let modified = null;
     if (q.gitModifiedOnly) {
         modified = await gitModifiedSet(cwd);
-        if (modified === null)
-            throw new Error("git:modified requires a git repository (git status failed)");
+        if (modified === null) {
+            // git status fails in bare repos too — distinguish "no repo" from "no worktree".
+            let bare = false;
+            try {
+                bare = (await runCmd("git", ["rev-parse", "--is-bare-repository"], cwd)).trim() === "true";
+            }
+            catch { /* not a repo at all */ }
+            throw new Error(bare ? "git:modified needs a worktree (bare repository)" : "git:modified requires a git repository (git status failed)");
+        }
     }
     const scored = [];
     for (const f of applyFindFilters(files, q, modified)) {
@@ -377,9 +384,13 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, whol
     for (const line of (await runCmd("rg", args, cwd, timeoutMs)).split(/\r?\n/)) {
         if (!line)
             continue;
-        const m = /^(.*?):(\d+):(\d+):(.*)$/.exec(line);
+        // [^\n] (not .) so a lone \r inside a matched line can't sink the row;
+        // \r is stripped from the emitted text for walker parity.
+        const m = /^([^\n]*?):(\d+):(\d+):([^\n]*)$/.exec(line);
         if (m)
-            out.push({ path: toNative(stripDotSlash(m[1].replace(/\\/g, "/"))), line: Number(m[2]), col: Number(m[3]), text: m[4].trim().slice(0, 500) });
+            out.push({ path: toNative(stripDotSlash(m[1].replace(/\\/g, "/"))), line: Number(m[2]), col: Number(m[3]), text: m[4].replace(/\r/g, "").trim().slice(0, 500) });
+        if (out.length >= GREP_CAP)
+            break; // same hard cap as the walker backend
     }
     return out;
 }
@@ -388,12 +399,17 @@ async function rgGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, whol
  * scan; not part of the tool contract. */
 export async function walkerRegexGrep(cwd, pattern, literal, ignoreCase, follow, deadline = 0, timeoutMs = 0, wholeWord = false, scope) {
     // Whole words need a regex even for literal patterns (escape first, then
-    // wrap); a bare regex pattern wraps as-is. ASCII \b: patterns that start
-    // or end with a non-word char may not match — same as rg -w.
-    // Global flag: one row per MATCH (rg parity), not one row per line.
+    // wrap); a bare regex pattern wraps as-is. wordWrap applies \b only at
+    // word-char edges — punctuation-edged patterns get [\w$] lookarounds so
+    // `cat.`/`.cat` match like rg -w. Global flag: one row per MATCH (rg parity),
+    // not one row per line. Patterns using \p{…}/\u{…} need the u flag or the
+    // escapes silently go dead.
+    const src = literal ? escapeRegExp(pattern) : pattern;
+    const wrapped = wholeWord ? wordWrap(src) : src;
+    const flags = (ignoreCase ? "gi" : "g") + (/\\[pu]\{/.test(src) ? "u" : "");
     let re;
     try {
-        re = new RegExp(wholeWord ? `\\b(?:${literal ? escapeRegExp(pattern) : pattern})\\b` : pattern, ignoreCase ? "gi" : "g");
+        re = new RegExp(wrapped, flags);
     }
     catch {
         throw new Error(`invalid regex: ${pattern}`);
@@ -412,23 +428,20 @@ export async function walkerRegexGrep(cwd, pattern, literal, ignoreCase, follow,
         }
         if (text === null)
             continue; // binary skip
-        const lines = text.split("\n");
+        const lines = splitLines(text);
         for (let i = 0; i < lines.length; i++) {
             const snippet = lines[i].replace(/\r/g, "").trim().slice(0, 500); // strip \r: \r-only files embed raw CRs that overwrite terminal rows
             re.lastIndex = 0;
             let m;
             while ((m = re.exec(lines[i])) !== null) {
+                out.push({ path: toNative(f), line: i + 1, col: m.index + 1, text: snippet });
+                if (out.length >= GREP_CAP)
+                    return out;
                 if (m[0] === "") {
                     re.lastIndex = m.index + 1;
                     if (re.lastIndex > lines[i].length)
                         break;
-                    continue;
-                }
-                out.push({ path: toNative(f), line: i + 1, col: m.index + 1, text: snippet });
-                if (out.length >= GREP_CAP)
-                    return out;
-                if (re.lastIndex === m.index)
-                    re.lastIndex++; // zero-length guard
+                } // zero-width rows still emit (rg parity for ^, ^$, z*)
             }
         }
     }
@@ -460,14 +473,16 @@ function workerGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeW
     return promise;
 }
 async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline = 0, timeoutMs = 0, wholeWord = false, scope) {
-    if (!literal || wholeWord) {
+    if (!literal || wholeWord || ignoreCase) {
         // Regex scan runs in a worker: a catastrophic pattern would otherwise hang
         // the event loop and the timeout race could never fire. Spawn failure
         // propagates — silently falling back inline would reintroduce the hang.
+        // Literal+ignoreCase rides along: an escaped literal can't hang, and the
+        // 'gi' regex fold avoids toLowerCase/indexOf over-matching (Turkish İ) and
+        // length-shifting folds that would corrupt columns.
         return workerGrep(cwd, pattern, literal, ignoreCase, follow, timeoutMs, wholeWord, scope);
     }
-    // Literal scan stays inline: indexOf cannot hang, so no worker is needed.
-    const needle = ignoreCase ? pattern.toLowerCase() : pattern;
+    // Literal case-sensitive scan stays inline: indexOf cannot hang, so no worker.
     const out = [];
     for (const f of await walkFiles(cwd, follow, deadline, timeoutMs, scope)) {
         checkDeadline(deadline, timeoutMs); // per file batch: abort the orphaned scan between reads
@@ -482,19 +497,19 @@ async function fallbackGrep(cwd, pattern, literal, ignoreCase, follow, deadline 
         }
         if (text === null)
             continue; // binary skip
-        const lines = text.split("\n");
+        const lines = splitLines(text);
         for (let i = 0; i < lines.length; i++) {
             const snippet = lines[i].replace(/\r/g, "").trim().slice(0, 500); // strip \r: \r-only files embed raw CRs that overwrite terminal rows
-            const hay = ignoreCase ? lines[i].toLowerCase() : lines[i];
+            const hay = lines[i];
             let from = 0;
             for (;;) {
-                const idx = hay.indexOf(needle, from);
+                const idx = hay.indexOf(pattern, from);
                 if (idx < 0)
                     break;
                 out.push({ path: toNative(f), line: i + 1, col: idx + 1, text: snippet });
                 if (out.length >= GREP_CAP)
                     return out;
-                from = idx + (needle.length > 0 ? needle.length : 1);
+                from = idx + (pattern.length > 0 ? pattern.length : 1);
                 if (from > hay.length)
                     break;
             }
@@ -525,7 +540,7 @@ export async function attachContext(cwdDir, matches, before, after) {
                 const text = decodeGrepText(await fs.readFile(path.join(cwd, m.path)));
                 if (text === null)
                     continue; // binary skip
-                lines = text.split("\n");
+                lines = splitLines(text);
             }
             catch {
                 continue;
@@ -627,7 +642,7 @@ export async function grepContents(pattern, opts = {}) {
             const ap = a.path.replace(/\\/g, "/"), bp = b.path.replace(/\\/g, "/");
             return ap < bp ? -1 : ap > bp ? 1 : a.line - b.line || a.col - b.col;
         });
-        return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend };
+        return { matches: pageOf(matches, opts.limit, opts.offset), total: matches.length, backend, capped: matches.length >= GREP_CAP || undefined };
     })();
     let timer;
     try {
@@ -647,13 +662,41 @@ export async function grepContents(pattern, opts = {}) {
 function escapeRegExp(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+/** Identifier-aware symbol boundaries: `$` is a word char here (JS identifiers),
+ * so `$foo` resolves and `foo` never matches inside `$foo`/`foo$bar`. Edges are
+ * conditional: a word-char edge stays `\b` (rg-compatible); a non-word edge uses
+ * a `[\w$]` lookaround — rg rejects look-arounds, so those patterns recover to
+ * the walker, which is still correct (previously they silently matched nothing). */
+function symBound(esc) {
+    const l = /^[\w$]/.test(esc) ? "\\b" : "(?<![\\w$])";
+    const r = /[\w$]$/.test(esc) ? "\\b" : "(?![\\w$])";
+    return `${l}${esc}${r}`;
+}
+/** rg -w parity for punctuation-edged patterns: `\b` only at edges that begin or
+ * end with a word char; non-word edges use `[\w$]` lookarounds instead (a bare
+ * `\b` wrap fails `cat.`/`.cat` — no boundary between two non-word chars). */
+function wordWrap(src) {
+    const l = /^[\w$]/.test(src) ? "\\b" : "(?<![\\w$])";
+    const r = /[\w$]$/.test(src) ? "\\b" : "(?![\\w$])";
+    return `${l}(?:${src})${r}`;
+}
+/** File text → lines without the phantom element `split("\n")` leaves after a
+ * trailing newline (rg sees no line there; an empty file has none either). */
+function splitLines(text) {
+    const lines = text.split("\n");
+    if (lines.length > 0 && lines[lines.length - 1] === "")
+        lines.pop();
+    return lines;
+}
 /** One ring of the callers matcher: the 3 text-heuristic patterns for a single
 symbol, definition lines filtered, merged/deduped into `seen` (visited
 `path:line` set doubles as the BFS cycle guard). Hard-capped by GREP_CAP. */
 async function directCallers(sym, base, seen, ring) {
     const esc = escapeRegExp(sym);
-    const patterns = [`\\b${esc}\\s*\\(`, `(?:import|from|require|use|include)\\b[^\\n]*\\b${esc}\\b`, `\\.${esc}\\b`];
-    const defRe = new RegExp(`^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+)*(?:function|def|fn|func|class)\\b[^\\n]*\\b${esc}\\b`);
+    const bound = symBound(esc); // $foo resolves: $ counts as an identifier char here
+    const rightEdge = /[\w$]$/.test(esc) ? "\\b" : "(?![\\w$])";
+    const patterns = [`${bound}\\s*\\(`, `(?:import|from|require|use|include)\\b[^\\n]*${bound}`, `\\.${esc}${rightEdge}`];
+    const defRe = new RegExp(`^\\s*(?:export\\s+|default\\s+|async\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|pub\\s+)*(?:function|def|fn|func|class)\\b[^\\n]*${bound}`);
     let backend = "rg";
     const fresh = [];
     for (const p of patterns) {
@@ -757,7 +800,7 @@ export async function callersOf(symbol, opts = {}) {
     const merged = [...seen.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line));
     const page = pageOf(merged, opts.limit, opts.offset);
     await attachContext(opts.cwd, page, opts.contextBefore ?? 0, opts.contextAfter ?? 0);
-    return { matches: page, total: merged.length, backend };
+    return { matches: page, total: merged.length, backend, capped: seen.size >= GREP_CAP || undefined };
 }
 /** Tools-side path rule mirrored for capsule scoping (dir/ prefix, glob, or bare name). */
 function matchPathFilter(p, filter) {
@@ -863,8 +906,9 @@ export async function capsuleOf(symbol, opts = {}) {
     const ignoreCase = opts.ignoreCase ?? false;
     const eq = (a, b) => ignoreCase ? a.toLowerCase() === b.toLowerCase() : a === b;
     const esc = escapeRegExp(symbol);
+    const bound = symBound(esc); // $foo resolves: $ counts as an identifier char here
     const base = { cwd: opts.cwd, scan: opts.scan, followSymlinks: opts.followSymlinks, timeoutMs: opts.timeoutMs };
-    const mentions = await grepContents(`\\b${esc}\\b`, { ...base, literal: false, ignoreCase });
+    const mentions = await grepContents(bound, { ...base, literal: false, ignoreCase });
     const inScope = (p) => !opts.pathFilter || matchPathFilter(p.replace(/\\/g, "/"), opts.pathFilter);
     const byFile = new Map();
     for (const m of mentions.matches) {
@@ -873,6 +917,15 @@ export async function capsuleOf(symbol, opts = {}) {
             byFile.set(m.path, (byFile.get(m.path) ?? 0) + 1);
     }
     const ordered = [...byFile.entries()].sort((a, b) => b[1] - a[1]).map(([p]) => p).slice(0, 30);
+    // A def in a file outside the top-30 mention files used to be unreachable:
+    // seed candidates with a definition-shaped grep so such files get outlined too.
+    const defHits = await grepContents(`(?:function|class|const|let|var|def|fn|func|interface|type|struct|enum|impl)\\b[^\\n]*${bound}`, { ...base, literal: false, ignoreCase });
+    for (const m of defHits.matches) {
+        if (ordered.length >= 60)
+            break;
+        if (inScope(m.path.replace(/\\/g, "/")) && !ordered.includes(m.path))
+            ordered.push(m.path);
+    }
     let def;
     for (const f of ordered) {
         let syms;
@@ -904,7 +957,7 @@ export async function capsuleOf(symbol, opts = {}) {
     }
     const lim = Math.min(Math.max(opts.limit ?? 10, 1), PAGE_MAX);
     const callers = await callersOf(symbol, { ...base, ignoreCase, limit: lim });
-    const imp = await grepContents(`(?:import|from|require|use|include)\\b[^\\n]*\\b${esc}\\b`, { ...base, literal: false, ignoreCase, limit: lim });
+    const imp = await grepContents(`(?:import|from|require|use|include)\\b[^\\n]*${bound}`, { ...base, literal: false, ignoreCase, limit: lim });
     const files = new Set();
     if (def)
         files.add(def.file);

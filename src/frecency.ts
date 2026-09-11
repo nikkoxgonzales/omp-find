@@ -31,8 +31,9 @@ function keyOf(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
-async function load(file: string): Promise<Store> {
-  if (cache !== null && cacheFile === file) return cache;
+/** Read + sanitize the store file straight from disk (no cache). Never throws:
+ * missing/corrupt files return a fresh store. */
+async function readDisk(file: string): Promise<Store> {
   try {
     const raw = await fs.promises.readFile(file, "utf8");
     const parsed = JSON.parse(raw) as Partial<Store>;
@@ -50,14 +51,32 @@ async function load(file: string): Promise<Store> {
         entries[k] = { count, last };
       }
     }
-    cache = { entries };
-  } catch { cache = fresh(); }
+    return { entries };
+  } catch { return fresh(); }
+}
+
+async function load(file: string): Promise<Store> {
+  if (cache !== null && cacheFile === file) return cache;
+  cache = await readDisk(file);
   cacheFile = file;
   return cache;
 }
 
-/** Atomic persist: sidecar write + fsync, then copyFile over live (never rename-over-live on Windows). */
-async function save(store: Store, file: string): Promise<void> {
+/** Atomic persist: sidecar write + fsync, then copyFile over live (never rename-over-live on Windows).
+ * With `merge` the live file is re-read first and folded in per key — max count,
+ * max last — so a concurrent process's batch survives instead of being clobbered
+ * (last-writer-wins → merge-on-save). Monotonic, so the merge can only add or
+ * raise entries; mutating `store` also freshens the shared cache. Remaining
+ * limit: no lock — simultaneous same-key writes keep the max, not the sum, so
+ * counts can under-count across processes. */
+async function save(store: Store, file: string, merge = false): Promise<void> {
+  if (merge) {
+    const disk = await readDisk(file);
+    for (const [k, e] of Object.entries(disk.entries)) {
+      const cur = store.entries[k];
+      store.entries[k] = cur === undefined ? e : { count: Math.max(cur.count, e.count), last: Math.max(cur.last, e.last) };
+    }
+  }
   await fs.promises.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp.${process.pid}`;
   const fh = await fs.promises.open(tmp, "w");
@@ -73,8 +92,10 @@ async function save(store: Store, file: string): Promise<void> {
 
 /** In-process write queue: parallel recordOpen calls otherwise race load→bump→save
  * (each loads a fresh store before the other saves) and all but one bump is lost.
- * Chained so every write sees the previous write's store. Cross-process stays
- * best-effort (last writer wins); documented in README + docs/extension.md. */
+ * Chained so every write sees the previous write's store. Cross-process writes
+ * merge per key on save (max count, max last) instead of last-writer-wins; no
+ * lock, so simultaneous same-key bumps can still under-count — documented in
+ * README + docs/extension.md. */
 let writeQueue: Promise<void> = Promise.resolve();
 function enqueueWrite(work: () => Promise<void>): Promise<void> {
   const run = writeQueue.then(work, work);
@@ -91,7 +112,7 @@ export async function recordOpen(p: string): Promise<void> {
       const key = keyOf(p);
       const prev = store.entries[key];
       store.entries[key] = { count: (prev?.count ?? 0) + 1, last: Date.now() };
-      await save(store, file);
+      await save(store, file, true);
     } catch { /* frecency tracking never breaks a session */ }
   });
 }

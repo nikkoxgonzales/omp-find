@@ -2,6 +2,23 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.5]
+
+### Fixed
+
+- rg grep no longer drops matches on lines containing a lone `\r` (vimgrep row parse was `\r`-intolerant); row text strips `\r` on both backends.
+- Walker regex reports zero-width matches (`^`, `^$`, `z*`) instead of silently skipping them.
+- `wholeWord` uses identifier-boundary semantics (`\b` at word-char edges, `[\w$]` lookarounds at non-word edges) — `cat.`/`.cat` now match like `rg -w`.
+- Literal `ignoreCase` no longer over-matches length-changing folds (e.g. Turkish İ) — routed through the regex path.
+- `ffcallers`/`ffcapsule` resolve symbols starting with non-word chars (`$foo`) via edge-conditional boundaries.
+- `ffcapsule` seeds definition candidates from a definition-shaped grep, so defs outside the top-30 mention files are found.
+- Context rows no longer emit a phantom empty row past EOF.
+- GREP_CAP (20000) now bounds rg too; `GrepResult.capped` surfaces as `N+`/`(capped)` in totals.
+- `.git` pointer files (linked worktrees) skipped by the walker.
+- `git:modified` in a bare repo reports `needs a worktree (bare repository)`.
+- `\p{...}`/`\u{...}` patterns compile with the `u` flag on the walker/worker path.
+- Frecency merges per-key on save (max count, max last) — two omp instances on one project no longer lose whole batches.
+
 ## [0.8.4]
 
 ### Fixed
