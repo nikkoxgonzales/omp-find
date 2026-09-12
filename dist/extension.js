@@ -7,6 +7,7 @@
  * registration, event subscription) stay best-effort `try/catch` — an unknown
  * host must never take down extension load.
  */
+import { appendNoteToMessages, buildFindToolsNote } from "./context.js";
 import { registerFindCommands } from "./commands.js";
 import { registerFindTools } from "./tools.js";
 import * as search from "./search.js";
@@ -58,5 +59,25 @@ export default function ompFindExtension(pi) {
     }
     catch {
         // Hosts without an event emitter simply skip frecency tracking.
+    }
+    try {
+        // Concise per-prompt reminder to prefer the ff tools over shell commands.
+        // Hosts that do not expose the `context` event skip this; the model still
+        // sees the individual tool cards and promptGuidelines.
+        pi.on?.("context", (event) => {
+            try {
+                const payload = event;
+                if (payload === undefined || !Array.isArray(payload.messages))
+                    return undefined;
+                const note = buildFindToolsNote();
+                return { messages: appendNoteToMessages(payload.messages, note) };
+            }
+            catch {
+                return undefined;
+            }
+        });
+    }
+    catch {
+        // Hosts without context support simply skip the per-prompt note.
     }
 }

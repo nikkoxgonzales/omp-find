@@ -291,6 +291,27 @@ describe('extension + tools wiring (needs core)', () => {
     }
     pi.emit('session_start', {}, {});
   });
+  it('injects a find-tools note into the last user message on the context event', async (t) => {
+    if (!extension?.default) return t.skip('dist/extension.js missing');
+    const pi = fakePi();
+    extension.default(pi);
+    const messages = [{ role: 'user', content: 'hello' }];
+    const [result] = pi.emit('context', { messages }, {});
+    assert.ok(result, 'context handler returned a result');
+    assert.ok(Array.isArray(result.messages), 'result has a messages array');
+    assert.equal(result.messages.length, 1, 'note appended to existing user message');
+    assert.match(result.messages[0].content, /<find-tools>/, 'find-tools note injected');
+  });
+  it('injects a find-tools note as a new user message when none exists', async (t) => {
+    if (!extension?.default) return t.skip('dist/extension.js missing');
+    const pi = fakePi();
+    extension.default(pi);
+    const [result] = pi.emit('context', { messages: [] }, {});
+    assert.ok(result, 'context handler returned a result');
+    assert.equal(result.messages.length, 1, 'new user message appended');
+    assert.equal(result.messages[0].role, 'user');
+    assert.match(result.messages[0].content, /<find-tools>/, 'find-tools note injected');
+  });
   it('no-arg resolve is override; explicit flag and env take precedence', async (t) => {
     if (!findTools?.resolveFindMode) return t.skip('core tools.ts not landed yet');
     const oldEnv = process.env.OMP_FIND_MODE;

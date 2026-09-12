@@ -25,9 +25,13 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 
 ## What an agent actually sees
 
-Unlike omp-peers, there is no injected per-prompt note — the agent sees tool cards and commands, nothing else.
+A concise `<find-tools>` note is injected into every prompt (like omp-peers does for `<peers>`) — it reminds the model to use the ff tools instead of shell find/ls/grep/rg/ctags. The agent also sees the tool cards and commands below.
 
 ```text
+<find-tools>
+Use the ff tools instead of shell find/ls/grep/rg/ctags: fffind for files, ffgrep for content, ffoutline for file shape, ffcallers for callers, ffstructural for AST-ish patterns, ffmap for repo overview, ffcapsule for one symbol. Results are approximate — verify with read.
+</find-tools>
+
 fffind ("Find files"; `find` in override mode)
   "Use instead of shell grep/rg/find/ls because results are fuzzy-ranked, frecency-ordered, paged, and counted. [...]"
   approval: read

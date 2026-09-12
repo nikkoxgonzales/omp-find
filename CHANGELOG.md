@@ -2,6 +2,12 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.8.13]
+
+### Added
+
+- A concise `<find-tools>` per-prompt context note is now injected on the host `context` event (like omp-peers does for `<peers>`), reminding the agent to use the ff tools instead of shell find/ls/grep/rg/ctags.
+
 ## [0.8.12]
 
 ### Fixed
