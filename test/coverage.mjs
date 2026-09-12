@@ -1320,14 +1320,18 @@ describe('ffgrep verbatim phrases + totals (no shell -c needed)', () => {
     }
   });
 
-  it('zero states name the pattern plus the backend when known', async () => {
+  it('zero states name the pattern, backend, and match mode', async () => {
     const root = await fixture({ 'a.txt': 'hello\n' });
     try {
       const pi = fakePiTwoArg();
       findTools.registerFindTools(pi, { search }, { mode: 'additive' });
       assert.match(
         textOf(await pi.tools.get('ffgrep').execute('t', { pattern: 'zzz-absent', cwd: root })),
-        /0 matches for "zzz-absent" \((rg|walker)\)/,
+        /0 matches for "zzz-absent" \((rg|walker), literal\)$/,
+      );
+      assert.match(
+        textOf(await pi.tools.get('ffgrep').execute('t', { pattern: 'zzz.*absent', literal: false, cwd: root })),
+        /0 matches for "zzz\.\*absent" \((rg|walker), regex\)$/,
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1336,7 +1340,27 @@ describe('ffgrep verbatim phrases + totals (no shell -c needed)', () => {
     findTools.registerFindTools(pi2, {
       search: { findPaths: async () => [], grepContents: async () => ({ matches: [], total: 0 }) },
     }, { mode: 'additive' });
-    assert.equal(textOf(await pi2.tools.get('ffgrep').execute('t', { pattern: 'zzz-absent' })), '0 matches for "zzz-absent"');
+    assert.equal(textOf(await pi2.tools.get('ffgrep').execute('t', { pattern: 'zzz-absent' })), '0 matches for "zzz-absent" (literal)');
+  });
+
+  it('zero-state hints literal:false only when a literal pattern looks like regex', async () => {
+    const pi = fakePiTwoArg();
+    findTools.registerFindTools(pi, {
+      search: { findPaths: async () => [], grepContents: async () => ({ matches: [], total: 0 }) },
+    }, { mode: 'additive' });
+    const grep = pi.tools.get('ffgrep');
+    const hint = 'pattern contains regex syntax; retry with literal:false';
+    // Regex-looking literals get the hint (the nanobot `a|b` failure mode).
+    assert.ok(textOf(await grep.execute('t', { pattern: 'api_service|runtime_config' })).includes(hint));
+    assert.ok(textOf(await grep.execute('t', { pattern: 'settings\\.api' })).includes(hint));
+    assert.ok(textOf(await grep.execute('t', { pattern: 'foo.*bar' })).includes(hint));
+    // Plain literals, spaced pipes, and || stay quiet.
+    for (const p of ['zzz-absent', 'a | b', 'a || b', 'foo(bar)']) {
+      const out = textOf(await grep.execute('t', { pattern: p }));
+      assert.ok(!out.includes(hint), `no hint for ${p}:\n${out}`);
+    }
+    // An explicit regex search never hints.
+    assert.ok(!textOf(await grep.execute('t', { pattern: 'a|b', literal: false })).includes(hint));
   });
 });
 

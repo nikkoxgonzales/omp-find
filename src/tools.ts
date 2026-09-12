@@ -412,6 +412,11 @@ function countSummary(entries: Array<readonly [string, number]>): string {
 function overBudget(rendered: string, maxChars: number | undefined): boolean {
   return maxChars !== undefined && rendered.length > maxChars;
 }
+/** Regex-intent detector for the zero-match hint: fires only on constructs that
+ * are near-certainly regex — escaped metachars (`\.`, `\w`), a lone alternation
+ * `a|b` (spaced `a | b` and `||` stay literal), `.*`/`.+`, `(?` groups, `{n,m}`
+ * — so literal code like `foo(bar)` or `a || b` never triggers it. */
+const REGEX_SYNTAX = /\\[.^$*+?(){}[\]\/wWsSdDbB]|(?<![|\s])\|(?![|\s])|\.\*|\.\+|\(\?|\{\d+,?\d*\}/;
 /** Optional scan root: must be an absolute directory when given. Resolution plus the */
 /** filesystem-root/home runaway guard live in the core (guardCwd); relative input is */
 /** rejected here so a bare "src" can never silently resolve against process.cwd(). */
@@ -615,13 +620,13 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
     },
   });
   const grepDef = (toolName: string): Record<string, unknown> => ({
-    description: "Use instead of shell grep/rg/find/ls because results are literal-safe, frecency-ranked, paged, and counted. Literal-safe any string (no escaping ever): e.g. pattern 'Chat ID (CHT-XXXX from list_chats or search_chats)' with path 'server.py' searches that one file literally (total returned, no counting needed). Bare-file/dir/glob path filter, zero-state scan facts, context lines, cwd scan root (no cd), maxChars budgets. Regex when literal=false.",
+    description: "Use instead of shell grep/rg/find/ls because results are literal-safe, frecency-ranked, paged, and counted. Patterns are LITERAL by default — pass literal:false for regex (e.g. 'a|b', 'foo\\.bar'). Literal needs no escaping ever: pattern 'Chat ID (CHT-XXXX from list_chats or search_chats)' with path 'server.py' searches that one file literally.",
     promptSnippet: "Search file contents literally or by regex (ranked, paged, counted)",
     approval: "read",
     promptGuidelines: [
-      "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with literal:true and a path filter.",
-      "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; stay literal unless regex is needed.",
-      "ffgrep: Scope with the path filter (dir/ prefix, *.ext glob, or bare filename like 'server.py') before broadening the search.",
+      "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with a path filter.",
+      "ffgrep: Patterns are literal by default; patterns containing |, \\., .*, or other regex syntax need literal:false.",
+      "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; scope with the path filter (dir/ prefix, *.ext glob, or bare filename like 'server.py') before broadening.",
     ],
     parameters: {
       type: "object",
@@ -763,7 +768,9 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
         const lines = groupGrepBlocks(blocks, tags);
         if (lines.length === 0) {
           const backend = typeof res.backend === "string" ? res.backend : undefined;
-          return withDetails(`${backend !== undefined ? `0 matches for "${pattern}" (${backend})` : `0 matches for "${pattern}"`}${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: 0, totalFiles: 0, truncated: false });
+          const mode = literal ? "literal" : "regex";
+          const hint = literal && REGEX_SYNTAX.test(pattern) ? " — pattern contains regex syntax; retry with literal:false if a regex was intended" : "";
+          return withDetails(`${backend !== undefined ? `0 matches for "${pattern}" (${backend}, ${mode})` : `0 matches for "${pattern}" (${mode})`}${hint}${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: 0, totalFiles: 0, truncated: false });
         }
         lines.push(`(${total}${capped ? "+" : ""} match${total === 1 ? "" : "es"} total${capped ? ", capped" : ""})`);
         if (!concise) lines.push(...nudge("grep", total));
@@ -1011,7 +1018,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
     },
   });
   const structuralDef = (toolName: string): Record<string, unknown> => ({
-    description: "Approximate structural code search (omp-find). Use instead of hand-rolled AST-ish shell grep chains (piped rg/sed for call shapes, def sites, usages): ast-grep-style $VAR/$$$ patterns lower to one ranked regex call with exactly one of pattern/symbol/references. Regex lowering over live text — not AST-accurate; every row is approx: labeled with a line number — verify with read. rewrite returns a preview diff only and never writes.",
+    description: "Approximate structural code search (omp-find). Use instead of hand-rolled AST-ish shell grep chains (piped rg/sed for call shapes, def sites, usages): one call takes exactly one of pattern/symbol/references — pattern is ast-grep-style $VAR/$$$ shape ('console.log($MSG)', 'kind:call'). Regex lowering over live text — not AST-accurate; every row is approx: labeled with a line number — verify with read. rewrite returns a preview diff only and never writes.",
     approval: "read",
     promptSnippet: "Search code by AST shape with $VAR/$$$ patterns (approximate; preview-only rewrite)",
     promptGuidelines: [

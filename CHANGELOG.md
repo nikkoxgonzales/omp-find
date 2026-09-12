@@ -11,6 +11,11 @@ Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lock
 - `ffcallers` `depth` validation no longer rejects cursor resumes; it uses the stored depth, reports drift, and requires an integer in {1,2,3} on fresh calls.
 - Documentation updated to reflect frecency locking and `ffoutline` depth semantics.
 
+### Changed
+
+- `ffgrep` zero-match output now names the match mode — `0 matches for "p" (rg, literal)` — and appends `pattern contains regex syntax; retry with literal:false` when a literal pattern contains regex constructs (`a|b`, `\.`, `.*`, `(?`, `{n,m}`), so a regex-shaped pattern searched literally no longer reads as a true absence.
+- `ffgrep` prompt surface no longer commands `literal:true` (a standing instruction that steered models away from `literal:false`); the description now leads with "Patterns are LITERAL by default — pass literal:false for regex" and a guideline names the regex-syntax trigger. `ffstructural`'s description front-loads the exactly-one-of pattern/symbol/references contract.
+
 ## [0.8.11]
 
 ### Fixed

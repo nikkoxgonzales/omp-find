@@ -44,13 +44,13 @@ fffind ("Find files"; `find` in override mode)
   maxChars: "Max output chars; when exceeded returns per-dir counts instead of rows"
   concise: "Concise paths-only rows (default false) — drops notes and tips, same ranking"
 ffgrep ("Grep content"; `grep` in override mode)
-  "Use instead of shell grep/rg/find/ls because results are literal-safe, frecency-ranked, paged, and counted. [...]"
+  "Use instead of shell grep/rg/find/ls because results are literal-safe, frecency-ranked, paged, and counted. Patterns are LITERAL by default — pass literal:false for regex (e.g. 'a|b', 'foo\\.bar'). Literal needs no escaping ever: pattern 'Chat ID (CHT-XXXX from list_chats or search_chats)' with path 'server.py' searches that one file literally."
   approval: read
   promptSnippet: "Search file contents literally or by regex (ranked, paged, counted)"
   promptGuidelines:
-    "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with literal:true and a path filter."
-    "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; stay literal unless regex is needed."
-    "ffgrep: Scope with the path filter (dir/ prefix, *.ext glob, or bare filename like 'server.py') before broadening the search."
+    "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with a path filter."
+    "ffgrep: Patterns are literal by default; patterns containing |, \\., .*, or other regex syntax need literal:false."
+    "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; scope with the path filter (dir/ prefix, *.ext glob, or bare filename like 'server.py') before broadening."
   pattern: "Search text or regex. Literal by default: quotes/parens need no escaping. Required unless resuming with cursor"
   path: "File filter: dir/ prefix ('src/'), glob ('*.ts'), or bare filename ('server.py'); applies over the full result set"
   literal: "Literal match (default true); set false to use regex"
@@ -94,7 +94,7 @@ ffcallers ("Find callers")
   exact_only: "Exact-only: drop possible mentions (member access `.SYM`, comments), keep import/call-paren sites"
   depth: "Caller depth 1|2|3 (default 1) — BFS over enclosing symbols for transitive callers; rows labeled depth:N; downstream callees out of scope"
 ffstructural ("Structural search"; `structural` alias, always registered)
-  "Approximate structural code search (omp-find). Use instead of hand-rolled AST-ish shell grep chains (piped rg/sed for call shapes, def sites, usages): ast-grep-style $VAR/$$$ patterns lower to one ranked regex call with exactly one of pattern/symbol/references. Regex lowering over live text — not AST-accurate; every row is approx: labeled with a line number — verify with read. rewrite returns a preview diff only and never writes."
+  "Approximate structural code search (omp-find). Use instead of hand-rolled AST-ish shell grep chains (piped rg/sed for call shapes, def sites, usages): one call takes exactly one of pattern/symbol/references — pattern is ast-grep-style $VAR/$$$ shape ('console.log($MSG)', 'kind:call'). Regex lowering over live text — not AST-accurate; every row is approx: labeled with a line number — verify with read. rewrite returns a preview diff only and never writes."
   approval: read
   promptSnippet: "Search code by AST shape with $VAR/$$$ patterns (approximate; preview-only rewrite)"
   promptGuidelines:
