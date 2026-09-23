@@ -9,13 +9,14 @@ fff is a full fuzzy-finding platform: a background file watcher, an LMDB cache, 
 ## Features
 
 - **`fffind`** — fuzzy file-path search over the live tree; exact and stem basename matches rank first.
+- **`ffjfind`** (`jfind` alias) — semantic grep: describe the behavior in plain language, get files plus judged line ranges with calibrated 0–1 relevance scores, strongest first. Three judged waves — filename ranking over a lexical pre-rank (IDF-weighted grep counts), sketch routing of byte-bounded windows, then verbatim passage verification — ≤16 judge requests in flight per wave, plus `grep_keywords` to steer the lexical pre-rank. Needs a judge: the host `@judge` role, hosted `TYPESAFE_API_KEY`/`OPENROUTER_API_KEY` keys, or a local `OMP_FIND_JUDGE_URL` endpoint. Credential files (`.env*`, keys, keystores, vaults) are never listed or read.
 - **`ffgrep`** — content search, literal by default, regex when `literal=false`; `contextBefore`/`contextAfter` (max 5) disambiguate without follow-up reads; `expand:function` attributes each hit to its enclosing symbol with an `in <kind> <name>` header (approximate, line-anchored). Result rows group by file under a `[path#TAG]` hashline header (whole-file content tag, same tag `read` shows — copy it into patch calls). An explicit `path` pin (`dir/` or `dir/file`) is searched directly on both backends, so pinned hidden/ignored files hit; glob and bare-basename filters still search the visible tree.
 - **`ffoutline`** (`outline` alias) — approximate per-file symbol overview. Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline → grep → read. Regex-based, explicitly approximate, every hit carries a line number.
 - **`ffcallers`** — approximate "who calls X". Use instead of shell grep chains: definition-vs-import-vs-call-site queries collapse into one frecency-ranked call. Text heuristics, explicitly approximate — confirm with read. Rows carry certainty labels: import/call-paren sites are exact, member mentions are `[possible]`-tagged; `exact_only` drops the possible rows. `depth: 1|2|3` (default 1) BFS-follows each ring's enclosing symbols for transitive callers, rows labeled `depth:N`, cycle-guarded and capped.
 - **`ffstructural`** (`structural` alias) — approximate structural search. Use instead of hand-rolled AST-ish shell grep chains: `$VAR`/`$$$` patterns, `kind:`/`symbol:`/`references:`/`inside:`/`has:` lower to one ranked regex call with exactly one of pattern/symbol/references; `rewrite` returns a `-`/`+` preview and never writes. Regex lowering, explicitly approximate — every row is `approx:` labeled.
 - **`ffmap`** (`map` alias) — fitted repo overview. Use instead of reading directory trees or shell `ls -R` to learn a repo: per-file symbol outlines ranked by frecency, git recency and import-centrality, cut to fit `maxChars` (default 8000). Fresh scan every call — never stale.
 - **`ffcapsule`** (`capsule` alias) — fused symbol dossier. Use instead of N round-trips (outline file, grep symbol, grep imports, list callers): signature + doc comment + top callers + import sites + a data-driven `Guidance:` next step in one call. All rows approximate — confirm with read.
-- **`concise`** — density knob on `fffind`/`ffgrep`/`ffoutline`. Minified end of the rendering range: paths-only rows, `path:line` probes, name-only outlines. Composes with (not replaces) cursors + `maxChars`.
+- **`concise`** — density knob on `fffind`/`ffgrep`/`ffjfind`/`ffoutline`. Minified end of the rendering range: paths-only rows, `path:line` probes, name-only outlines. Composes with (not replaces) cursors + `maxChars`.
 - **`maxChars` budgets** — on every tool. Over-budget output degrades to counts/summaries instead of shell-pipe dumps: per-dir (find), per-file (grep/callers/structural), kind counts (outline), omitted-files footer (map), row shrinking (capsule).
 - **Query subset** — `dir/` prefix, `*.ext`-style globs, `!` exclusions, `git:modified`; leftover words fuzzy-match the path.
 - **Per-project JSON frecency** — every opened file bumps count + recency (7-day half-life decay); frequent/recent paths sort first. Fed by host `tool_result` events for `read`/`edit`/`write` plus our own `ffoutline`/`ffcapsule` file targets. Stored under `%LOCALAPPDATA%/omp-find` (Windows) or `~/.omp/var/omp-find`, keyed by project-root hash.
@@ -29,7 +30,8 @@ A concise `<find-tools>` note is injected into every prompt (like omp-peers does
 
 ```text
 <find-tools>
-Use the ff tools instead of shell find/ls/grep/rg/ctags: fffind for files, ffgrep for content, ffoutline for file shape, ffcallers for callers, ffstructural for AST-ish patterns, ffmap for repo overview, ffcapsule for one symbol. Results are approximate — verify with read.
+Start EVERY code search with ffjfind (describe the behavior in plain language) before any ffgrep/glob/shell search — one call replaces pattern-guessing chains. ffgrep is for exact strings, regexes, and known symbols only; fffind for file names.
+Use the ff tools instead of shell find/ls/grep/rg/ctags: fffind for files, ffgrep for content, ffjfind for semantic search by description, ffoutline for file shape, ffcallers for callers, ffstructural for AST-ish patterns, ffmap for repo overview, ffcapsule for one symbol. Results are approximate — verify with read.
 </find-tools>
 
 fffind ("Find files"; `find` in override mode)
@@ -39,7 +41,7 @@ fffind ("Find files"; `find` in override mode)
   promptGuidelines:
     "fffind: Never use shell find/ls/dir to locate files — use fffind with 1-2 short terms."
     "fffind: Keep fffind queries SHORT: 1-2 terms (e.g. 'user_service'); add terms only to narrow, never as OR."
-    "fffind: Prefer bare identifiers over sentences; when the top hit is an exact filename match, read it directly."
+    "fffind: Prefer bare identifiers over sentences; when the top hit is an exact filename match, read it directly; use ffjfind first for concepts/behaviors you can describe."
   pattern: "Fuzzy query: 1-2 short terms (e.g. 'srv usr'); supports dir/ prefix, *.ext globs, !exclusions, git:modified"
   path: "Within-tree filter prepended to the query (e.g. 'src/')"
   cwd: "Scan root: absolute directory to search (default: session cwd) — pass cwd instead of cd"
@@ -54,7 +56,7 @@ ffgrep ("Grep content"; `grep` in override mode)
   promptGuidelines:
     "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with a path filter."
     "ffgrep: Patterns are literal by default; patterns containing |, \\., .*, or other regex syntax need literal:false."
-    "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; scope with the path filter (dir/ prefix, *.ext glob, or bare filename like 'server.py') before broadening."
+    "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; scope with the path filter (dir/ prefix, *.ext glob, or bare filename like 'server.py') before broadening; use ffjfind first for concepts/behaviors you can describe."
   pattern: "Search text or regex. Literal by default: quotes/parens need no escaping. Required unless resuming with cursor"
   path: "File filter: dir/ prefix ('src/'), glob ('*.ts'), or bare filename ('server.py'); applies over the full result set"
   literal: "Literal match (default true); set false to use regex"
@@ -69,6 +71,22 @@ ffgrep ("Grep content"; `grep` in override mode)
   expand: "Enclosing-symbol attribution: 'function' adds an 'in <kind> <name>' header per match via an outline pass (default 'none') — approximate, line-anchored"
   maxChars: "Max output chars; when exceeded returns per-file counts instead of rows"
   concise: "Concise path:line rows (default false) — existence probe without text; ignores context params"
+ffjfind ("Semantic find"; `jfind` alias, always registered)
+  "Use FIRST for any behavior/concept search. Semantic grep: describe what you are looking for in plain language; returns the files and line ranges that implement it, each with a calibrated 0–1 relevance score. No index; searches the live workspace tree on every call."
+  approval: read
+  promptSnippet: "Semantic grep: find files and line ranges by describing what they do"
+  promptGuidelines:
+    "ffjfind: MUST be the first call when you do not already know where a behavior lives — one ffjfind replaces a chain of guessed ffgrep patterns and glob sweeps; NEVER grep/glob blindly for a concept you can describe."
+    "ffjfind: Use when you can describe the behavior but not the file name — one call replaces ffgrep pattern-guessing chains."
+    "ffjfind: query is plain language (a concept or behavior), never a regex; put verbatim identifiers in grep_keywords."
+    "ffjfind: Scope with path (one directory) when you know the subsystem — fewer files to rank means cheaper, sharper results."
+  query: "what to find, in plain language (concept or behavior, not a regex)"
+  grep_keywords: "identifiers or terms likely to appear verbatim in matching source; steer lexical pre-ranking. [] when unsure"
+  path: "one directory to search (e.g. 'src/'); omit for the workspace root"
+  cwd: "Scan root: absolute directory to search (default: session cwd) — pass cwd instead of cd; refused for filesystem-root and home"
+  limit: "Max hits rendered (default 30, max 50)"
+  maxChars: "Max output chars; when exceeded returns per-file counts instead of rows"
+  concise: "Concise path+score rows (default false) — drops range rows and snippets"
 ffoutline ("Outline file"; `outline` alias, always registered)
   "Approximate per-file symbol overview (omp-find). Use instead of reading whole files or ctags shells to learn file shape: a 10-line outline composes as outline->grep->read. Regex-based, not LSP-accurate; every hit carries a line number — verify with read/ffgrep. Outlining a file records it as opened for frecency."
   approval: read
@@ -139,7 +157,7 @@ ffcapsule ("Symbol dossier"; `capsule` alias, always registered)
   ignoreCase: "Case-insensitive match"
   limit: "Max callers/imports shown each (default 10, max 50)"
   maxChars: "Max output chars; caller/import rows shrink to fit, noted when they do"
-Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." / "ffmap failed: ..." / "ffcapsule failed: ..." (no/excess pattern/symbol/references, unknown/expired cursor, non-absolute cwd, `depth` outside 1|2|3, non-integer `limit`/`depth`/`contextBefore`/`contextAfter`/`maxChars`, `limit` < 1, non-string primary params on direct `execute()`).
+Errors return as text: "fffind failed: ..." / "ffgrep failed: ..." / "ffjfind failed: ..." / "ffoutline failed: ..." / "ffcallers failed: ..." / "ffstructural failed: ..." / "ffmap failed: ..." / "ffcapsule failed: ..." (no/excess pattern/symbol/references, empty query, judge unavailable, all judge requests failed, scope `path` not an existing directory under the scan root, unknown/expired cursor, non-absolute cwd, `depth` outside 1|2|3, non-integer `limit`/`depth`/`contextBefore`/`contextAfter`/`maxChars`, `limit` < 1, non-string primary params on direct `execute()`).
 Stale cursors (tree changed since page 1) return restart guidance as text: "...: results changed since page 1; re-run without cursor".
 Each execute also returns `details: { totalMatched, totalFiles, truncated }` (pi-fff packaging: totals over the full result set, `truncated` when a next page or count-fallback applies); hosts that ignore it see identical text. Paged results add a `"<limit> matches limit reached (max 50) — more via cursor"` notice next to the cursor footer.
 ```
@@ -169,6 +187,14 @@ server.py:42:5: // Chat ID (CHT-XXXX from list_chats or search_chats) ...
 src/frecency.ts:12:3: const HALF_LIFE_MS = ...
 src/tools.ts:136:9: const ranked = ...
 (2 matches total)
+
+> ffjfind { "query": "where is the download rate limit enforced?" }   # describe it, get files+line ranges
+1 hit(s) for "where is the download rate limit enforced?" (τ 0.20), strongest first
+
+src/rate_limit.ts  0.87  41 lines judged
+  src/rate_limit.ts:118-146  0.87  const MAX_ATTEMPTS = ...
+
+listed 3 · judged 6 · read 1 files (12.4 KB) · 3 requests · 1,918 tokens · $0.0001 · 1.6s wall / 1.4s api
 
 > ffoutline { "path": "src/search.ts" }   # approximate shape, not a full read
 src/search.ts:17:1: function parseFindQuery
@@ -234,19 +260,26 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 ## Tools / Commands
 
 | Tool / command | What it does |
+| `ffjfind` (`jfind` alias) (`query`, `grep_keywords`, `path`, `cwd`, `limit`, `maxChars`, `concise`) | Semantic grep: `path  score  N lines judged` rows strongest first, each with ≤3 `  path:start-end  score  snippet` range rows from judged complete passages (merged adjacent spans, max score). Footer `listed N · judged N (filename + window judgments) · read N files (X KB) · N requests · N tokens · $X · wall / api`; judge failures listed, never thrown; zero hits render `no hits for "…" (τ 0.20)` + the same footer. Scores are absolute yes/no probabilities comparable across calls; below ~0.4 is weak evidence. No cursor — re-call with a refined query. |
 | `ffgrep` (`pattern`, `path`, `literal`, `ignoreCase`, `wholeWord`, `smartCase`, `cwd`, `limit`, `cursor`, `contextBefore`, `contextAfter`, `expand`, `maxChars`, `concise`) | `path:line:col: text` matches plus a `(N matches total)` line; path filter applies over the full result set. Empty results report the pattern + backend. Context lines (indented, max 5/side) disambiguate without follow-up reads; `expand:function` interleaves approximate `in <kind> <name>` attribution headers (outline-miss rows stay bare); over budget → per-file counts. `concise` renders `path:line` probes, ignoring context/expand. |
 | `ffoutline` (`path`, `cwd`, `depth`, `limit`, `cursor`, `maxChars`, `concise`) | Approximate `path:line:col: kind name` overview — use instead of full reads/ctags shells; composes outline → grep → read. Over budget → kind counts. `concise` renders name-only rows. |
 | `ffcallers` (`symbol`, `path`, `cwd`, `ignoreCase`, `limit`, `cursor`, `maxChars`, `exact_only`, `depth`) | Approximate `path:line:col: text` reference sites — use instead of shell grep chains; frecency-ranked. Import/call-paren rows are exact, member mentions carry `[possible]`; `exact_only` keeps exact rows. `depth` 2\|3 BFS-follows enclosing symbols for transitive callers (cycle-guarded, capped); rows labeled `depth:N`. Over budget → per-file counts. |
 | `ffstructural` (`pattern`, `symbol`, `references`, `language`, `path`, `ignoreCase`, `limit`, `cursor`, `contextBefore`, `contextAfter`, `maxChars`, `rewrite`) | Approximate structural search — ast-grep-style `$VAR`/`$$$` patterns lower to one ranked call; exactly one of pattern/symbol/references; `rewrite` previews only. Rows `approx:` labeled. |
 | `ffmap` (`path`, `cwd`, `maxChars`) | Fitted `path:` + symbol overview ranked by frecency/recency/centrality; omitted-files footer. No cursor — re-call with a bigger budget refines. |
 | `ffcapsule` (`symbol`, `path`, `cwd`, `ignoreCase`, `limit`, `maxChars`) | Fused dossier: def + doc + callers + imports + `Guidance:` next step. Single page, no cursor. |
-| `/find-health` | Scan backend status (rg version or walker fallback) plus frecency status, with ok/warn/error levels — plus a `session:` stats block (calls per tool, rg-vs-walker mix, timeouts, avg ms; in-memory only). |
+| `/find-health` | Scan backend status (rg version or walker fallback) plus frecency status, with ok/warn/error levels — plus a `judge:` line (resolved judge label or `none configured`) and a `session:` stats block (calls per tool, rg-vs-walker mix, timeouts, avg ms; in-memory only). |
 | `/find-rescan` | Drops the frecency store (nothing else is cached) and resets the session counters. |
 
-`fffind` / `ffgrep` / `ffoutline` / `ffcallers` / `ffstructural` / `ffmap` / `ffcapsule` are always present (`outline`, `structural`, `map`, `capsule` aliases); override mode additionally claims `find` / `grep` (same handlers, where the host allows).
+`fffind` / `ffgrep` / `ffjfind` / `ffoutline` / `ffcallers` / `ffstructural` / `ffmap` / `ffcapsule` are always present (`jfind`, `outline`, `structural`, `map`, `capsule` aliases); override mode additionally claims `find` / `grep` (same handlers, where the host allows).
 
 ## Honest limits
 
+- `ffjfind` needs a judge — with none configured it errors with fix-up text (`no judge available (configure a @judge model role, or set TYPESAFE_API_KEY/OPENROUTER_API_KEY, or OMP_FIND_JUDGE_URL)`) instead of degrading to a plain grep. Every call costs real judge tokens over the whole (scoped) tree; narrow with `path`/`grep_keywords` before broadening. Scores are model judgments, not ground truth.
+- `ffjfind` sketch judgments are routing signals only: a reported range always comes from a complete verified passage, so a high sketch score that fails verification produces no hit and no range.
+- `ffjfind` judge requests cap at 6 retries per provider with backoff honoring `retry-after`; a single-provider (local) client never retries in place and never fails over — one bad request is one lost batch. Judge failures degrade coverage (fewer candidates read, fewer passages verified) and are listed in the report, never thrown; only total failure (judge requests failed with zero usable judgments) renders as a tool error.
+- `ffjfind` files are listed once via the full-tree scan (gitignore-honoring, hidden files excluded) and filtered against deny-lists (build dirs, lockfiles, binaries, credentials); a credential file outside these lists (e.g. a renamed key file) would be read like any other file. Binary/blank files are silent expected misses, not failures. File sizes are statted only for the ≤128 tree-rendered candidates.
+- `ffjfind` hits beyond `limit` (default 30, max 50) are computed but not rendered (`(… M more hits not shown)`); over-budget output degrades to per-file judged-line counts. No cursor — re-call to refine.
+- `ffjfind` `path` accepts one existing directory under the scan root (glob/escape forms error); `cwd` refuses filesystem-root and home like the other tools.
 - Unpinned hidden-file listing differs by backend (rg follows ignore rules AND skips dotfiles — no `--hidden` is passed; the walker skips dot-dirs outright but lists dotfiles in visible dirs) — pin an explicit `path` for identical results.
 - `node_modules` pruning is walker-only; rg follows your ignore files instead.
 - Cursors bind to result total + backend, so a compensating add+delete swap or rename/content-preserving mutation between pages reads as unchanged and resumes silently.
@@ -281,7 +314,7 @@ Hot-files recipe (≈ `codedb_hot`): `fffind` with a `git:modified` query and no
 - `ffcallers` `depth` 2|3 fetches each BFS ring in parallel — transitive depth costs one round-trip per ring, not per symbol.
 - `ffoutline` covers `export async function` declarations alongside plain `function`.
 - `ffstructural` `inside:`/`has:` take one `OUTER >> INNER` / `OUTER << INNER` pair — chained combinators (`inside: a >> b >> c`) are rejected, not nested.
-- `concise` exists only on `fffind`/`ffgrep`/`ffoutline`; other tools ignore it.
+- `concise` exists only on `fffind`/`ffgrep`/`ffjfind`/`ffoutline`; other tools ignore it.
 - `limit` must be an integer ≥ 1 — `limit: 0` errors (`limit must be >= 1`), `limit: 2.5` errors (`limit must be an integer >= 1`); same integer rule on `depth` (`depth must be an integer` on ffoutline; ffcallers' closed-set message), `contextBefore`/`contextAfter` (`must be an integer`), and `maxChars` (`must be an integer >= 1`) — no silent flooring.
 - `ffcallers` `depth` accepts only 1|2|3 — other values error (`depth must be 1, 2, or 3`) instead of clamping to 1.
 - Primary params (`pattern`/`symbol`/`path`/`references`) must be strings when given — a non-string errors (`<param>: expected string`) instead of coercing or passing silently. Defense-in-depth only: on the live path the host JSON-parses string args and coerces scalars/objects to the declared schema type before `execute()` runs (`pattern: 123` arrives as `'123'`, `pattern: {a:1}` as `'{"a":1}'`), so this check can only fire for direct `execute()` callers (tests, embedders bypassing the host). Note `pattern: "null"` JSON-parses to `null` at the host layer, which surfaces as `provide a pattern`.
@@ -310,6 +343,14 @@ Mode precedence, highest first:
 
 Scanning needs no config: `rg --files` / `rg --vimgrep` when `rg` is on `PATH`, otherwise the builtin walker (symlinks not followed by default). Frecency location follows the store path above; deleting it is safe.
 Tool surface: `OMP_FIND_TOOLS=core|full` (default `core` = the full surface above as it stands; `full` adds nothing today and is reserved for future tools so they don't bloat the default). Unknown values fall back to `core`.
+
+`ffjfind` judge resolution, highest first:
+
+1. `OMP_FIND_JUDGE_URL` (or legacy `JEGREP_ENDPOINT_URL`) — unauthenticated local System One endpoint; explicit user intent wins.
+2. The host `@judge` model role (omp/pi ≥ 18.2.8) via the judgment module — `OMP_FIND_JUDGE_MODEL` overrides the session model when set (default `jev-latest`).
+3. `OPENROUTER_API_KEY` / `TYPESAFE_API_KEY` from the process env, then `~/.env` — both load independently and fail over (OpenRouter first). Hosted endpoints bill input tokens at $42/1B; the local endpoint is free.
+
+Numeric cascade knobs accept env overrides `OMP_FIND_CASCADE_<NAME>` (parsed, clamped): `PARALLEL` (16), `NAME_BATCH` (64), `CANDIDATES` (128), `FILES` (20), `WINDOWS` (24), `WINDOW_BYTES` (8192), `SKETCH_BYTES` (384), `FULL_LIMIT` (40), `CUTOFF` (0.45), `THRESHOLD` (0.2), `READ_LIMIT` (4 MB), `SKETCH_STATE_BYTES` (18000), `SKETCH_CARDS_MAX` (48), `VERIFY_STATE_BYTES` (24 KB), `SCAN_TIMEOUT_MS` (30000), `FAILURES_KEPT` (5).
 
 ## Install
 

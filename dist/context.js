@@ -9,7 +9,8 @@
 export function buildFindToolsNote() {
     return [
         "<find-tools>",
-        "Use the ff tools instead of shell find/ls/grep/rg/ctags: fffind for files, ffgrep for content, ffoutline for file shape, ffcallers for callers, ffstructural for AST-ish patterns, ffmap for repo overview, ffcapsule for one symbol. Results are approximate — verify with read.",
+        "Start EVERY code search with ffjfind (describe the behavior in plain language) before any ffgrep/glob/shell search — one call replaces pattern-guessing chains. ffgrep is for exact strings, regexes, and known symbols only; fffind for file names.",
+        "Use the ff tools instead of shell find/ls/grep/rg/ctags: fffind for files, ffgrep for content, ffjfind for semantic search by description, ffoutline for file shape, ffcallers for callers, ffstructural for AST-ish patterns, ffmap for repo overview, ffcapsule for one symbol. Results are approximate — verify with read.",
         "</find-tools>",
     ].join("\n");
 }

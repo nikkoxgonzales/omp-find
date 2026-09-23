@@ -1,6 +1,8 @@
-/** omp-find tool surface (core default; OMP_FIND_TOOLS=full reserved) with session counters for /find-health. `fffind` + `ffgrep` always; override mode additionally claims `find` + `grep`. */
+/** omp-find tool surface (core default; OMP_FIND_TOOLS=full reserved) with session counters for /find-health. `fffind` + `ffgrep` + `ffjfind` always; override mode additionally claims `find` + `grep`. */
 import fs from "node:fs";
 import path from "node:path";
+import { humanSize, rankedHeat, runCascade } from "./jfind.js";
+import { resolveJudge } from "./judge.js";
 const FIND_PAGE = 30;
 const GREP_PAGE = 30;
 const PAGE_MAX = 50;
@@ -41,7 +43,7 @@ export function resolveFindMode(explicit, cwd = process.cwd()) {
     catch { /* missing/unparseable → default */ }
     return "override";
 }
-const STAT_KINDS = ["find", "grep", "outline", "callers", "structural", "map", "capsule"];
+const STAT_KINDS = ["find", "grep", "jfind", "outline", "callers", "structural", "map", "capsule"];
 const sessionStats = { calls: {}, totalCalls: 0, rg: 0, walker: 0, timeouts: 0, totalMs: 0 };
 function recordCall(kind, ms, backend, timedOut) {
     sessionStats.calls[kind] = (sessionStats.calls[kind] ?? 0) + 1;
@@ -140,11 +142,13 @@ const NUDGES = {
         "tip: ffoutline <file> shows a file's shape before you read it",
         "tip: ffcallers <name> finds call sites without grep chains",
         "tip: ffmap gives a fitted repo overview in one call",
+        "tip: ffjfind 'where is X handled?' finds files by description when names fail",
     ],
     grep: [
         "tip: ffcallers <name> finds call sites without grep chains",
         "tip: ffstructural 'f($A)' finds call shapes, not strings",
         "tip: ffcapsule <name> fuses signature, doc, callers and next step in one call",
+        "tip: ffjfind 'where is X handled?' finds files by description when keyword greps drown",
     ],
 };
 /** One rotating tip for non-trivial results; empty for trivial calls. */
@@ -506,7 +510,7 @@ export function registerFindTools(pi, deps, opts = {}) {
         promptGuidelines: [
             "fffind: Never use shell find/ls/dir to locate files — use fffind with 1-2 short terms.",
             "fffind: Keep fffind queries SHORT: 1-2 terms (e.g. 'user_service'); add terms only to narrow, never as OR.",
-            "fffind: Prefer bare identifiers over sentences; when the top hit is an exact filename match, read it directly.",
+            "fffind: Prefer bare identifiers over sentences; when the top hit is an exact filename match, read it directly; use ffjfind first for concepts/behaviors you can describe.",
         ],
         parameters: {
             type: "object",
@@ -661,7 +665,7 @@ export function registerFindTools(pi, deps, opts = {}) {
         promptGuidelines: [
             "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with a path filter.",
             "ffgrep: Patterns are literal by default; patterns containing |, \\., .*, or other regex syntax need literal:false.",
-            "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; scope with the path filter (dir/ prefix, *.ext glob, or bare filename like 'server.py') before broadening.",
+            "ffgrep: Prefer bare identifiers (e.g. 'frecency') over sentences; scope with the path filter (dir/ prefix, *.ext glob, or bare filename like 'server.py') before broadening; use ffjfind first for concepts/behaviors you can describe.",
         ],
         parameters: {
             type: "object",
@@ -837,7 +841,12 @@ export function registerFindTools(pi, deps, opts = {}) {
                 if (lines.length === 0) {
                     const backend = typeof res.backend === "string" ? res.backend : undefined;
                     const mode = literal ? "literal" : "regex";
-                    const hint = literal && REGEX_SYNTAX.test(pattern) ? " — pattern contains regex syntax; retry with literal:false if a regex was intended" : "";
+                    const hints = [];
+                    if (literal && REGEX_SYNTAX.test(pattern))
+                        hints.push("pattern contains regex syntax; retry with literal:false if a regex was intended");
+                    if (literal && pattern.trim().split(/\s+/).filter(Boolean).length >= 3)
+                        hints.push("try ffjfind with that as query");
+                    const hint = hints.length > 0 ? ` — ${hints.join("; ")}` : "";
                     return withDetails(`${backend !== undefined ? `0 matches for "${pattern}" (${backend}, ${mode})` : `0 matches for "${pattern}" (${mode})`}${hint}${resumeNote ? `\n\n${resumeNote}` : ""}`, { totalMatched: 0, totalFiles: 0, truncated: false });
                 }
                 lines.push(`(${total}${capped ? "+" : ""} match${total === 1 ? "" : "es"} total${capped ? ", capped" : ""})`);
@@ -871,6 +880,176 @@ export function registerFindTools(pi, deps, opts = {}) {
             }
             finally {
                 recordCall("grep", Date.now() - t0, statBackend, statTimeout);
+            }
+        },
+    });
+    /** Directory scope for ffjfind: one existing directory under the scan root,
+     * no glob magic, no escape-shaped input (mirrors scopePin's guard). */
+    function jfindRoot(cwd, raw) {
+        const flat = raw.replace(/\\/g, "/");
+        const f = flat.startsWith("./") ? flat.slice(2) : flat;
+        if (f === "" || f === ".")
+            return cwd;
+        if (/[*?[{]/.test(f) || f.startsWith("/") || /^[A-Za-z]:/.test(f) || f.split("/").includes("..")) {
+            throw new Error(`path must be a directory inside the scan root: ${raw}`);
+        }
+        return path.join(cwd, ...f.split("/").filter(Boolean));
+    }
+    /** grep_keywords array param: strings only, [] when absent. */
+    function keywordsParam(params) {
+        const v = params["grep_keywords"];
+        if (v === undefined)
+            return [];
+        if (!Array.isArray(v) || v.some(e => typeof e !== "string"))
+            throw new Error("grep_keywords must be an array of strings");
+        return v.filter((e) => typeof e === "string");
+    }
+    /** `1.2s`-style duration for the report footer. */
+    function fmtDuration(ms) {
+        if (ms < 1000)
+            return `${Math.round(ms)}ms`;
+        if (ms < 60_000)
+            return `${(ms / 1000).toFixed(1)}s`;
+        return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`;
+    }
+    /** Thousands-separated token count for the report footer. */
+    function fmtNumber(n) {
+        return n.toLocaleString("en-US");
+    }
+    const jfindDef = (toolName) => ({
+        description: [
+            "Use FIRST for any behavior/concept search. Semantic grep: describe what you are looking for in plain language; returns the files and line ranges that implement it, each with a calibrated 0–1 relevance score. No index; searches the live workspace tree on every call.",
+            "",
+            "<instruction>",
+            "- `query`: a concept or behavior (\"where do we verify JWT tokens?\", \"retry budget for failed requests\"), not a regex.",
+            "- `grep_keywords`: identifiers, symbols, or terms likely to appear verbatim in matching source; they steer the lexical pre-ranking. Pass `[]` when nothing specific comes to mind. Quoted phrases in `query` are also matched whole.",
+            "- `path`: one directory to search; omit for the workspace root. Narrow it when you already know the subsystem — fewer files to rank means cheaper, sharper results.",
+            "- Results are strongest first as `path:start-end score snippet` (paths relative to the workspace); open ranges with `read`.",
+            "- Scores are absolute yes/no probabilities: comparable across calls; below ~0.4 is weak evidence, so widen the query or fall back to `ffgrep` before concluding absence.",
+            "</instruction>",
+            "",
+            "<critical>",
+            "- MUST be the first call when you do not already know where a behavior lives: one `ffjfind` replaces a chain of guessed `ffgrep` patterns followed by speculative reads. NEVER grep blindly for a concept you can describe.",
+            "- `ffgrep` is for exact strings, regexes, and known symbols; `fffind` is for file names. Reach for them after `ffjfind` has narrowed the files, or when the target is literally a string.",
+            "- Every call spends judge requests over the whole workspace; batch related questions into one descriptive `query` instead of many narrow calls.",
+            "</critical>",
+        ].join("\n"),
+        promptSnippet: "Semantic grep: find files and line ranges by describing what they do",
+        approval: "read",
+        promptGuidelines: [
+            "ffjfind: MUST be the first call when you do not already know where a behavior lives — one ffjfind replaces a chain of guessed ffgrep patterns and glob sweeps; NEVER grep/glob blindly for a concept you can describe.",
+            "ffjfind: Use when you can describe the behavior but not the file name — one call replaces ffgrep pattern-guessing chains.",
+            "ffjfind: query is plain language (a concept or behavior), never a regex; put verbatim identifiers in grep_keywords.",
+            "ffjfind: Scope with path (one directory) when you know the subsystem — fewer files to rank means cheaper, sharper results.",
+        ],
+        parameters: {
+            type: "object",
+            properties: {
+                query: { type: "string", description: "what to find, in plain language (concept or behavior, not a regex)" },
+                grep_keywords: { type: "array", items: { type: "string" }, description: "identifiers or terms likely to appear verbatim in matching source; steer lexical pre-ranking. [] when unsure" },
+                path: { type: "string", description: "one directory to search (e.g. 'src/'); omit for the workspace root" },
+                cwd: { type: "string", description: "Scan root: absolute directory to search (default: session cwd) — pass cwd instead of cd; refused for filesystem-root and home" },
+                limit: { type: "number", description: "Max hits rendered (default 30, max 50)" },
+                maxChars: { type: "number", description: "Max output chars; when exceeded returns per-file counts instead of rows" },
+                concise: { type: "boolean", description: "Concise path+score rows (default false) — drops range rows and snippets" },
+            },
+            additionalProperties: false,
+        },
+        execute: async (_toolCallId, params, signal, onUpdate, ctx) => {
+            const t0 = Date.now();
+            try {
+                const query = strictStrParam(params, "query");
+                if (query === undefined || query.trim().length === 0)
+                    return text(`${toolName} failed: query must be a non-empty description`);
+                const q = query.trim();
+                const extraKeywords = keywordsParam(params);
+                const limit = numParam(params, "limit") ?? FIND_PAGE;
+                const maxChars = charsParam(params, "maxChars");
+                const concise = params["concise"] === true;
+                const base = path.resolve(cwdParam(params) ?? process.cwd());
+                const rawPath = strictStrParam(params, "path");
+                let root = base;
+                let scopeDisplay;
+                if (rawPath !== undefined) {
+                    root = jfindRoot(base, rawPath);
+                    let st;
+                    try {
+                        st = fs.statSync(root);
+                    }
+                    catch {
+                        return text(`${toolName} failed: path not found: ${rawPath}`);
+                    }
+                    if (!st.isDirectory())
+                        return text(`${toolName} failed: path is not a directory: ${rawPath}`);
+                    const relDisp = toDisplay(path.relative(base, root));
+                    if (relDisp.length > 0)
+                        scopeDisplay = `${relDisp}/`;
+                }
+                const judge = await resolveJudge(pi, ctx);
+                if (judge === undefined) {
+                    return text(`${toolName} failed: no judge available (configure a @judge model role, or set TYPESAFE_API_KEY/OPENROUTER_API_KEY, or OMP_FIND_JUDGE_URL)`);
+                }
+                const result = await runCascade({
+                    root,
+                    query: q,
+                    extraKeywords,
+                    judge,
+                    ...(signal !== undefined ? { signal } : {}),
+                    onProgress: (message) => {
+                        try {
+                            onUpdate?.({ content: [{ type: "text", text: message }] });
+                        }
+                        catch { /* progress is best-effort */ }
+                    },
+                    ...(frecency !== undefined ? { frecencyScore: (rel) => safeScore(frecency, path.join(root, ...rel.split("/"))) } : {}),
+                });
+                const { hits, threshold, stats } = result;
+                const where = scopeDisplay === undefined ? "" : ` in ${scopeDisplay}`;
+                const tau = `(τ ${threshold.toFixed(2)})`;
+                if (stats.requests > 0 && stats.errors > 0 && stats.judged === 0 && stats.windowsJudged === 0) {
+                    const failBlock = stats.failures.length > 0
+                        ? `\n${stats.failures.map(f => `  ${f}`).join("\n")}`
+                        : "";
+                    return text(`${toolName} failed: all ${stats.requests} judge requests failed${failBlock}`);
+                }
+                const out = [];
+                if (hits.length === 0) {
+                    out.push(`no hits for "${q}"${where} ${tau}`);
+                }
+                else {
+                    out.push(`${hits.length} hit(s) for "${q}"${where} ${tau}, strongest first`, "");
+                    const shown = hits.slice(0, limit);
+                    for (const hit of shown) {
+                        const display = scopeDisplay === undefined ? hit.rel : `${scopeDisplay}${hit.rel}`;
+                        if (concise) {
+                            out.push(`${display}  ${hit.contentScore.toFixed(2)}`);
+                            continue;
+                        }
+                        out.push(`${display}  ${hit.contentScore.toFixed(2)}  ${hit.truncated ? `${hit.linesSeen} lines judged, partial` : `${hit.linesSeen} lines judged`}`);
+                        for (const range of rankedHeat(hit.ranges, 3)) {
+                            const span = range.start === range.end ? String(range.start) : `${range.start}-${range.end}`;
+                            out.push(`  ${display}:${span}  ${range.p.toFixed(2)}  ${range.snippet}`);
+                        }
+                    }
+                    if (shown.length < hits.length)
+                        out.push(`(... ${hits.length - shown.length} more hits not shown; raise limit or refine the query)`);
+                }
+                out.push("", `listed ${stats.listed} · judged ${stats.judged + stats.windowsJudged} · read ${stats.filesRead} files (${humanSize(stats.fileBytes)}) · ${stats.requests} requests · ${fmtNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${fmtDuration(Date.now() - t0)} wall / ${fmtDuration(stats.apiMs)} api`);
+                if (stats.failures.length > 0) {
+                    out.push(`${stats.errors} of ${stats.requests} requests failed:`, ...stats.failures.map(failure => `  ${failure}`));
+                }
+                const rendered = out.join("\n");
+                if (overBudget(rendered, maxChars)) {
+                    const byFile = hits.map(hit => [scopeDisplay === undefined ? hit.rel : `${scopeDisplay}${hit.rel}`, hit.linesSeen]);
+                    return withDetails(`Matched ${hits.length} hit(s) in ${hits.length} files (output exceeds ${maxChars} chars). Per-file judged lines: ${countSummary(byFile)}. Refine query/path or raise maxChars.`, { totalMatched: hits.length, totalFiles: stats.listed, truncated: true });
+                }
+                return withDetails(rendered, { totalMatched: hits.length, totalFiles: stats.listed, truncated: false });
+            }
+            catch (err) {
+                return text(`${toolName} failed: ${errMsg(err)}`);
+            }
+            finally {
+                recordCall("jfind", Date.now() - t0);
             }
         },
     });
@@ -1471,6 +1650,11 @@ export function registerFindTools(pi, deps, opts = {}) {
     });
     register("fffind", "Find files", findDef("fffind"));
     register("ffgrep", "Grep content", grepDef("ffgrep"));
+    register("ffjfind", "Semantic find", jfindDef("ffjfind"));
+    try {
+        register("jfind", "Semantic find", jfindDef("jfind"));
+    }
+    catch { /* alias where the host allows */ }
     if (typeof search.outlineFile === "function") {
         register("ffoutline", "Outline file", outlineDef("ffoutline"));
         try {

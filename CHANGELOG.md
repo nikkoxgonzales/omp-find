@@ -2,6 +2,22 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.9.0]
+
+### Added
+
+- **`ffjfind` (alias `jfind`)** — semantic grep driven by a judgment model. Describe the behavior in plain language (`query`) plus optional `grep_keywords`; the cascade ranks the tree lexically (IDF-weighted per-file grep counts over the full listing, credential files never listed/read), judges the top ≤128 candidates by filename over a rendered tree, routes byte-bounded passage sketches (≥0.45 cutoff, top 40 verified), and verifies complete passages per file — ≤16 judge requests in flight per wave. Hits render strongest first with judged line ranges (adjacent spans merged, max score), one snippet per range, and a footer with listed/judged/read/requests/tokens/cost/wall-vs-api timings; judge failures are listed, never thrown. Judge resolution: `OMP_FIND_JUDGE_URL`/`JEGREP_ENDPOINT_URL` local endpoint → host `@judge` role (`@oh-my-pi/pi-coding-agent/judgment`) → hosted `OPENROUTER_API_KEY`/`TYPESAFE_API_KEY` (env or `~/.env`) with failover, $42/1B input tokens billed; `OMP_FIND_JUDGE_MODEL` overrides the model (default `jev-latest`). Numeric cascade knobs overridable via clamped `OMP_FIND_CASCADE_<NAME>` env vars.
+- `/find-health` now reports a `judge:` line — the resolved judge label or `none configured`.
+- `ffgrep` zero-match on a ≥3-word literal pattern appends a `try ffjfind with that as query` hint; the find/grep nudge rotation gained an `ffjfind` cross-tip; the per-prompt `<find-tools>` note now opens with "start EVERY code search with ffjfind" and the `fffind`/`ffgrep` prompt guidelines point at `ffjfind` first for describable concepts; README/docs list `ffjfind`.
+- Numeric env overrides for the cascade are parse+clamp guarded (non-numeric values fall back to defaults; floats clamp to [0,1]).
+- `ffjfind` `path` accepts a `./`-prefixed directory (`jfindRoot` strips the prefix); passage-sketch verification asks the filename question with the full query text.
+
+### Fixed
+- `tsc` no longer follows the real `@oh-my-pi/pi-coding-agent` monorepo sources through `node_modules`: the judgment specifier is now typed through a `paths`-mapped stub (`src/omp-judgment.d.ts`), replacing the ambient `declare module` shorthand.
+- `ffjfind` reports `all N judge requests failed` only when nothing was judged at all (partial judge failures still render hits plus a failure list); the footer `judged` total counts filename-judged files plus verified sketch windows.
+- Lexical pre-ranking filters secret-denylist files (`client_secret.json`, credential extensions) by filename, not just exact paths; the host `@judge` role client is awaited before judging.
+- Judge HTTP client honors `Retry-After` (seconds or HTTP-date) on 429/5xx before falling back to exponential backoff; folder short-circuits no longer count directory names as filename criteria.
+
 ## [0.8.13]
 
 ### Added

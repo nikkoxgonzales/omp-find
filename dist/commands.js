@@ -8,6 +8,7 @@
  * Session stats come from the tools module (in-memory counters, reset on rescan).
  */
 import { sessionStatsText, resetSessionStats } from "./tools.js";
+import { resolveJudge } from "./judge.js";
 function notify(ctx, text, kind) {
     try {
         ctx?.ui?.notify?.(text, kind);
@@ -26,7 +27,7 @@ function statusLevel(status) {
     const text = typeof status === "string" ? status : JSON.stringify(status);
     return /missing|fallback|walker/i.test(text) ? "warn" : "ok";
 }
-function healthText(deps) {
+function healthText(deps, judgeLine) {
     const lines = ["find status"];
     let kind = "info";
     try {
@@ -61,6 +62,7 @@ function healthText(deps) {
         kind = "error";
     }
     lines.push(sessionStatsText());
+    lines.push(judgeLine);
     return { text: lines.join("\n"), kind };
 }
 async function rescanText(deps) {
@@ -94,7 +96,16 @@ export function registerFindCommands(pi, deps = {}) {
     pi.registerCommand('find-health', {
         description: 'Show omp-find index and frecency status',
         handler: async (_args, ctx) => {
-            const health = healthText(deps);
+            let judgeLine = 'judge: none configured';
+            try {
+                const judge = await resolveJudge(pi, ctx);
+                if (judge !== undefined)
+                    judgeLine = `judge: ok (${judge.label})`;
+            }
+            catch (err) {
+                judgeLine = `judge: error (${err instanceof Error ? err.message : String(err)})`;
+            }
+            const health = healthText(deps, judgeLine);
             notify(ctx, health.text, health.kind);
         },
     });

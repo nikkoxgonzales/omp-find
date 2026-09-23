@@ -768,7 +768,7 @@ describe('registerFindTools edges', () => {
   it('supports the single-arg host arity', async () => {
     const pi = fakePiOneArg();
     findTools.registerFindTools(pi, { search: stubSearch(['a.ts']) }, { mode: 'additive' });
-    assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep']);
+    assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep', 'ffjfind', 'jfind']);
     const out = await pi.tools.get('fffind').execute('t', { pattern: 'a' });
     assert.ok(textOf(out).includes('a.ts'));
   });
@@ -1075,7 +1075,7 @@ describe('extension host tolerance', () => {
     pi2.emit('session_start', {}, {});
     await new Promise((r) => setTimeout(r, 150));
     assert.ok(pi2.commands.has('find-health'), 'commands wired');
-    assert.deepEqual([...pi2.tools.keys()].sort(), ['capsule', 'ffcallers', 'ffcapsule', 'fffind', 'ffgrep', 'ffmap', 'ffoutline', 'ffstructural', 'find', 'grep', 'map', 'outline', 'structural']);
+    assert.deepEqual([...pi2.tools.keys()].sort(), ['capsule', 'ffcallers', 'ffcapsule', 'fffind', 'ffgrep', 'ffjfind', 'ffmap', 'ffoutline', 'ffstructural', 'find', 'grep', 'jfind', 'map', 'outline', 'structural']);
     pi2.emit('session_start', {}, {});
   });
 });
@@ -1175,7 +1175,7 @@ describe('fff-ported cases (adapted)', () => {
       assert.equal(mode, 'override');
       const pi = fakePiTwoArg();
       findTools.registerFindTools(pi, { search: { findPaths: async () => [], grepContents: async () => ({ matches: [], total: 0 }) } }, { mode: 'bogus', cwd: root });
-      assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep', 'find', 'grep']);
+      assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep', 'ffjfind', 'find', 'grep', 'jfind']);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1209,7 +1209,7 @@ describe('tool cards displace shell (wording, approval, arity)', () => {
     findTools.registerFindTools({ registerTool(...args) { seen.push(args); } }, {
       search: { findPaths: async () => [], grepContents: async () => ({ matches: [], total: 0 }) },
     }, { mode: 'additive' });
-    assert.deepEqual(seen.map((a) => a[0].name).sort(), ['fffind', 'ffgrep']);
+    assert.deepEqual(seen.map((a) => a[0].name).sort(), ['fffind', 'ffgrep', 'ffjfind', 'jfind']);
     for (const args of seen) assert.equal(args.length, 1, 'one object, not (name, def)');
   });
 });
@@ -1650,7 +1650,7 @@ describe('tiered tool surface (pick 11)', () => {
   it('default registers the current surface', async () => {
     const pi = fakePiTwoArg();
     await withEnv({ OMP_FIND_TOOLS: undefined }, async () => findTools.registerFindTools(pi, { search }, { mode: 'additive' }));
-    for (const name of ['fffind', 'ffgrep', 'ffoutline', 'outline', 'ffcallers', 'ffstructural', 'structural', 'ffmap', 'map', 'ffcapsule', 'capsule']) {
+    for (const name of ['fffind', 'ffgrep', 'ffjfind', 'jfind', 'ffoutline', 'outline', 'ffcallers', 'ffstructural', 'structural', 'ffmap', 'map', 'ffcapsule', 'capsule']) {
       assert.ok(pi.tools.has(name), `missing ${name}`);
     }
   });
@@ -1669,7 +1669,7 @@ describe('tiered tool surface (pick 11)', () => {
     for (const tier of ['core', 'full']) {
       const pi = fakePiTwoArg();
       findTools.registerFindTools(pi, { search }, { mode: 'additive', tools: tier });
-      assert.deepEqual([...pi.tools.keys()].sort(), ['capsule', 'ffcallers', 'ffcapsule', 'fffind', 'ffgrep', 'ffmap', 'ffoutline', 'ffstructural', 'map', 'outline', 'structural']);
+      assert.deepEqual([...pi.tools.keys()].sort(), ['capsule', 'ffcallers', 'ffcapsule', 'fffind', 'ffgrep', 'ffjfind', 'ffmap', 'ffoutline', 'ffstructural', 'jfind', 'map', 'outline', 'structural']);
     }
   });
 });

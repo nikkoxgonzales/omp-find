@@ -15,6 +15,9 @@
     "sourceMap": false,
     "outDir": "dist",
     "rootDir": "src",
+    "paths": {
+      "@oh-my-pi/pi-coding-agent/judgment": ["./src/omp-judgment.d.ts"]
+    },
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts"]

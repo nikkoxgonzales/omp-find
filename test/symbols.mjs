@@ -279,7 +279,7 @@ describe('tools: ffoutline and ffcallers', () => {
     findTools.registerFindTools(pi, {
       search: { findPaths: async () => [], grepContents: async () => ({ matches: [], total: 0 }) },
     }, { mode: 'additive' });
-    assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep']);
+    assert.deepEqual([...pi.tools.keys()].sort(), ['fffind', 'ffgrep', 'ffjfind', 'jfind']);
   });
 
   it('maxChars falls back to tiered summaries per tool', async () => {

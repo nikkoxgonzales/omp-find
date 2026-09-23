@@ -8,6 +8,7 @@
  * Session stats come from the tools module (in-memory counters, reset on rescan).
  */
 import { sessionStatsText, resetSessionStats } from "./tools.js";
+import { resolveJudge } from "./judge.js";
 
 export interface FindCommandDeps {
   search?: any;
@@ -35,7 +36,7 @@ function statusLevel(status: unknown): "ok" | "warn" {
   return /missing|fallback|walker/i.test(text) ? "warn" : "ok";
 }
 
-function healthText(deps: FindCommandDeps): { text: string; kind: string } {
+function healthText(deps: FindCommandDeps, judgeLine: string): { text: string; kind: string } {
   const lines: string[] = ["find status"];
   let kind = "info";
   try {
@@ -68,6 +69,7 @@ function healthText(deps: FindCommandDeps): { text: string; kind: string } {
     kind = "error";
   }
   lines.push(sessionStatsText());
+  lines.push(judgeLine);
   return { text: lines.join("\n"), kind };
 }
 
@@ -100,7 +102,14 @@ export function registerFindCommands(pi: any, deps: FindCommandDeps = {}): void 
   pi.registerCommand('find-health', {
     description: 'Show omp-find index and frecency status',
     handler: async (_args: string, ctx: any) => {
-      const health = healthText(deps);
+      let judgeLine = 'judge: none configured';
+      try {
+        const judge = await resolveJudge(pi, ctx);
+        if (judge !== undefined) judgeLine = `judge: ok (${judge.label})`;
+      } catch (err) {
+        judgeLine = `judge: error (${err instanceof Error ? err.message : String(err)})`;
+      }
+      const health = healthText(deps, judgeLine);
       notify(ctx, health.text, health.kind);
     },
   });
