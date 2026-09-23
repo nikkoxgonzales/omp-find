@@ -2,6 +2,13 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+## [0.10.0]
+
+### Added
+
+- `fffind`/`ffgrep`/`ffjfind` (plus the `jfind` alias and the `find`/`grep` override registrations) now register with `loadMode: "essential"`, the same tier as `bash` — previously they omitted `loadMode` and defaulted to `discoverable` (collapsed/hidden). `ffoutline`/`ffcallers`/`ffstructural`/`ffmap`/`ffcapsule` are untouched (still omit `loadMode`).
+- Bash-search guard: the extension subscribes to the host `tool_call` event and blocks interactive code-search shell-outs with `{ block: true, reason }` naming the `ffgrep { "pattern": … }` / `fffind { "pattern": … }` call to use instead. Blocks a leading `grep`/`egrep`/`fgrep`/`rg`, `xargs … grep`, `find … -name/-iname/-path/-ipath/-regex/-wholename` (unless an action flag `-delete`/`-exec`/`-execdir`/`-ok`/`-okdir` is present — fffind can't run actions), and `ls -R`/`ls --recursive`. A `| grep`/`| xargs grep` pipe stage only blocks behind a file-content/file-listing first stage (`cat`/`head`/`tail`/`ls`/`find`/`dir`/`type`/`sort`/`less`/`more`/`awk`/`sed`/`cut`/`tr`/`uniq`/`jq`); `tail -f`/`-F`/`--follow` is a live stream and passes, as do `ps`/`kubectl`/`history`/`npm`/`curl` pipes. `|` inside quotes is masked, leading `sudo`/`env`/`nice`/`ionice`/`time`/`command` wrappers and `VAR=value` prefixes are stripped, and a grep after `&&`/`||`/`;` never blocks. `OMP_FIND_GUARD=off|0|false|no` disables it; it only runs when the ff tools registered in this process and fails open on any unexpected shape.
+
 ## [0.9.0]
 
 ### Added

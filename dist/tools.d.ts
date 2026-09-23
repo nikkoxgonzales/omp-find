@@ -37,6 +37,45 @@ export declare function sessionStatsText(): string;
 /** back to core. */
 export type FindToolsTier = "core" | "full";
 export declare function resolveFindToolsTier(explicit?: string): FindToolsTier;
+/** True once the ff tools are registered in this process (guard may block). */
+export declare function isFindToolsReady(): boolean;
+/** Escape hatch: `OMP_FIND_GUARD=off|0|false|no` disables the bash-search guard (default on). */
+export declare function isFindGuardEnabled(): boolean;
+export interface BashSearchBlock {
+    kind: "grep" | "find";
+    message: string;
+}
+/**
+ * Exact blocking rule (kept tight to avoid breaking builds/scripts).
+ * - Trim the command, then mask `|` inside quoted spans (replaced with NUL)
+ *   so `echo "a | grep b"` or `printf 'x|y' | wc` never see a fake pipe.
+ *   Stage checks only inspect heads, so masked pipes are never unmasked.
+ * - Strip leading wrappers and env assignments until stable:
+ *   `sudo`/`env`/`nice`/`ionice` (with `-flag`/`--flag=val` args), `time`,
+ *   `command`, and `VAR=value` prefixes — `FOO=1 grep x`, `time grep x`,
+ *   `sudo -E grep x`, `env FOO=1 grep x` all reach the checks. A flag that
+ *   takes a separate value (`sudo -u root`) can still slip through
+ *   (fail-open).
+ * - Split the remainder on single `|` pipes only (`||` stays inside one
+ *   stage, so `cmd || grep` never blocks; `&&`/`;` are never split, so a
+ *   grep after `&&`/`||`/`;` never blocks).
+ * - Block when the FIRST stage head is a search binary:
+ *   `grep`/`egrep`/`fgrep`/`rg` (any flags), `xargs … grep/rg`,
+ *   `find … -name/-iname/-path/-ipath/-regex/-wholename` unless an action
+ *   flag (`-delete`/`-exec`/`-execdir`/`-ok`/`-okdir`) is present — fffind
+ *   can't run actions — and `ls -R`/`ls --recursive` (combined flags like
+ *   `-lR` count). Bare `ls`, `find` without those flags, and `cat` alone
+ *   never block.
+ * - OR when the first stage is a file-content/file-listing producer
+ *   (`cat`/`head`/`tail`/`ls`/`find`/`dir`/`type`/`sort`/`less`/`more`/
+ *   `awk`/`sed`/`cut`/`tr`/`uniq`/`jq` — `tail -f`/`-F`/`--follow` exempt,
+ *   a live stream ffgrep can't do) and any later pipe stage head is
+ *   `grep`/`egrep`/`fgrep`/`rg` (optional `sudo `) or `xargs … grep/rg`.
+ *   Non-producer first stages (`ps`, `kubectl`, `history`, `git`, `npm`,
+ *   `curl`, …) keep their `| grep` pipes.
+ * Returns the block kind + model-facing message, or undefined to pass through.
+ */
+export declare function decideBashSearchBlock(command: unknown): BashSearchBlock | undefined;
 /** Standard xxHash32 over raw bytes. Stripe rounds use P2/rotl13/P1; the
  * leftover 4-byte tail lane uses P3/rotl17/P4. NO lane-merge round after
  * combining v1..v4 (that merge belongs to XXH64): h is rotl(v1,1)+

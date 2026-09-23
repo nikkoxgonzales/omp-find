@@ -10,7 +10,7 @@
 
 import { appendNoteToMessages, buildFindToolsNote, type ContextMessage } from "./context.js";
 import { registerFindCommands } from "./commands.js";
-import { registerFindTools } from "./tools.js";
+import { decideBashSearchBlock, isFindGuardEnabled, isFindToolsReady, registerFindTools } from "./tools.js";
 import * as search from "./search.js";
 import * as frecency from "./frecency.js";
 
@@ -76,5 +76,28 @@ export default function ompFindExtension(pi: FindExtensionHost): void {
     });
   } catch {
     // Hosts without context support simply skip the per-prompt note.
+  }
+  try {
+    // Mechanism over advisory text: block interactive code-search shell-outs
+    // at the host `tool_call` seam (ToolCallEventResult { block, reason }) so
+    // the model is redirected to the ff tools in the same tier as bash.
+    // Fail-open by construction: unknown shapes, disabled guard, unregistered
+    // tools, or any throw returns undefined (never blocks).
+    pi.on?.("tool_call", (event: unknown) => {
+      try {
+        const e = event as { toolName?: unknown; input?: unknown } | null;
+        if (e == null || e.toolName !== "bash") return undefined;
+        if (!isFindToolsReady()) return undefined;
+        if (!isFindGuardEnabled()) return undefined;
+        const input = e.input as { command?: unknown } | null;
+        const block = decideBashSearchBlock(input?.command);
+        if (block === undefined) return undefined;
+        return { block: true, reason: block.message };
+      } catch {
+        return undefined;
+      }
+    });
+  } catch {
+    // Hosts without an event emitter simply skip the guard.
   }
 }

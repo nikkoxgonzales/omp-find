@@ -112,6 +112,101 @@ export function resolveFindToolsTier(explicit?: string): FindToolsTier {
   return v === "full" ? "full" : "core";
 }
 
+/** Bash-search guard readiness: true once registerFindTools has registered the
+ * ff tools in this process. The extension's `tool_call` handler checks it so a
+ * host where registration failed (or never ran) never blocks bash. */
+let findToolsReady = false;
+/** True once the ff tools are registered in this process (guard may block). */
+export function isFindToolsReady(): boolean {
+  return findToolsReady;
+}
+/** Escape hatch: `OMP_FIND_GUARD=off|0|false|no` disables the bash-search guard (default on). */
+export function isFindGuardEnabled(): boolean {
+  return !/^(?:off|0|false|no)$/.test((process.env.OMP_FIND_GUARD ?? "").trim().toLowerCase());
+}
+export interface BashSearchBlock { kind: "grep" | "find"; message: string }
+const GREP_BLOCK_MESSAGE = 'Blocked shell code search: use ffgrep { "pattern": "<term>", "path": "src/" } instead of grep/rg in bash. For concepts you can describe, start with ffjfind.';
+const FIND_BLOCK_MESSAGE = 'Blocked shell file search: use fffind { "pattern": "<1-2 terms>" } instead of find -name/ls -R in bash.';
+/** First-stage commands whose stdout is file contents or file listings — only
+ * these make a later `| grep` stage a code/file search ffgrep replaces. `ps`,
+ * `kubectl`, `history`, `curl`, build tools, etc. pipe process output, not
+ * files, so their grep stages pass. */
+const FILE_PRODUCER = /^(?:cat|head|tail|ls|find|dir|type|sort|less|more|awk|sed|cut|tr|uniq|jq)(?:\s|$)/;
+/** `tail -f`/`-F`/`--follow` is a live stream ffgrep can't do — exempt from the producer gate. */
+const TAIL_CMD = /^tail(?:\s|$)/;
+const TAIL_FOLLOW_FLAG = /\s-(?:f|F|-*follow)\b/;
+/**
+ * Exact blocking rule (kept tight to avoid breaking builds/scripts).
+ * - Trim the command, then mask `|` inside quoted spans (replaced with NUL)
+ *   so `echo "a | grep b"` or `printf 'x|y' | wc` never see a fake pipe.
+ *   Stage checks only inspect heads, so masked pipes are never unmasked.
+ * - Strip leading wrappers and env assignments until stable:
+ *   `sudo`/`env`/`nice`/`ionice` (with `-flag`/`--flag=val` args), `time`,
+ *   `command`, and `VAR=value` prefixes — `FOO=1 grep x`, `time grep x`,
+ *   `sudo -E grep x`, `env FOO=1 grep x` all reach the checks. A flag that
+ *   takes a separate value (`sudo -u root`) can still slip through
+ *   (fail-open).
+ * - Split the remainder on single `|` pipes only (`||` stays inside one
+ *   stage, so `cmd || grep` never blocks; `&&`/`;` are never split, so a
+ *   grep after `&&`/`||`/`;` never blocks).
+ * - Block when the FIRST stage head is a search binary:
+ *   `grep`/`egrep`/`fgrep`/`rg` (any flags), `xargs … grep/rg`,
+ *   `find … -name/-iname/-path/-ipath/-regex/-wholename` unless an action
+ *   flag (`-delete`/`-exec`/`-execdir`/`-ok`/`-okdir`) is present — fffind
+ *   can't run actions — and `ls -R`/`ls --recursive` (combined flags like
+ *   `-lR` count). Bare `ls`, `find` without those flags, and `cat` alone
+ *   never block.
+ * - OR when the first stage is a file-content/file-listing producer
+ *   (`cat`/`head`/`tail`/`ls`/`find`/`dir`/`type`/`sort`/`less`/`more`/
+ *   `awk`/`sed`/`cut`/`tr`/`uniq`/`jq` — `tail -f`/`-F`/`--follow` exempt,
+ *   a live stream ffgrep can't do) and any later pipe stage head is
+ *   `grep`/`egrep`/`fgrep`/`rg` (optional `sudo `) or `xargs … grep/rg`.
+ *   Non-producer first stages (`ps`, `kubectl`, `history`, `git`, `npm`,
+ *   `curl`, …) keep their `| grep` pipes.
+ * Returns the block kind + model-facing message, or undefined to pass through.
+ */
+export function decideBashSearchBlock(command: unknown): BashSearchBlock | undefined {
+  if (typeof command !== "string") return undefined;
+  const trimmed = command.trim();
+  if (trimmed.length === 0) return undefined;
+  // Mask `|` inside quoted spans so `echo "a | grep b"` never splits into a
+  // fake pipe stage; stage checks only inspect heads, so nothing unmasks.
+  let rest = trimmed.replace(/"[^"]*"|'[^']*'/g, (m) => m.replace(/\|/g, "\u0000"));
+  // Strip leading wrappers (with their flags) and `VAR=value` env assignments
+  // until stable so `FOO=1 grep x`, `time grep x`, `sudo -E grep x`, and
+  // `env FOO=1 grep x` all reach the checks. A flag taking a separate value
+  // (`sudo -u root`) may still slip through — fail-open is fine.
+  for (;;) {
+    const before = rest;
+    rest = rest.replace(/^(?:(?:sudo|env|nice|ionice)(?:\s+-[\w=]+)*|time|command)\s+/, "").trimStart();
+    rest = rest.replace(/^(?:[A-Za-z_]\w*=\S+\s+)+/, "").trimStart();
+    if (rest === before) break;
+  }
+  if (rest.length === 0) return undefined;
+  const stages = rest.split(/(?<!\|)\|(?!\|)/).map((s) => s.trim());
+  const first = stages[0] ?? "";
+  if (/^(?:(?:e|f)?grep|rg)(?:\s|$)/.test(first) || /^xargs\s+.*\b(?:(?:e|f)?grep|rg)\b/.test(first)) {
+    return { kind: "grep", message: GREP_BLOCK_MESSAGE };
+  }
+  if (/^find(?:\s|$)/.test(first) && /\s-(?:i?name|i?path|regex|wholename)\b/.test(first) && !/\s-(?:delete|exec|execdir|ok|okdir)\b/.test(first)) {
+    return { kind: "find", message: FIND_BLOCK_MESSAGE };
+  }
+  if (/^ls(?:\s|$)/.test(first) && /(?:^|\s)(?:-[A-Za-z]*R|--recursive)\b/.test(first)) {
+    return { kind: "find", message: FIND_BLOCK_MESSAGE };
+  }
+  // Producer-gated pipe stages: only a file-content/file-listing first stage
+  // makes a later `| grep` a code search; `tail -f` is a live stream (exempt).
+  if (FILE_PRODUCER.test(first) && !(TAIL_CMD.test(first) && TAIL_FOLLOW_FLAG.test(first))) {
+    for (let i = 1; i < stages.length; i++) {
+      const stage = stages[i] ?? "";
+      if (/^(?:sudo\s+)?(?:(?:e|f)?grep|rg)(?:\s|$)/.test(stage) || /\bxargs\s+.*\b(?:(?:e|f)?grep|rg)\b/.test(stage)) {
+        return { kind: "grep", message: GREP_BLOCK_MESSAGE };
+      }
+    }
+  }
+  return undefined;
+}
+
 function text(t: string): { content: Array<{ type: string; text: string }> } {
   return { content: [{ type: "text", text: t }] };
 }
@@ -504,6 +599,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
     description: "Use instead of shell grep/rg/find/ls because results are fuzzy-ranked, frecency-ordered, paged, and counted. Fuzzy 1-2 terms plus dir/glob/exclusion/git:modified filters with auto-retry on long queries and scan counts; e.g. pattern 'srv usr' with path 'src/' lists ranked matches under src/.",
     promptSnippet: "Find files by fuzzy name (frecency-ranked, paged, counted)",
     approval: "read",
+    loadMode: "essential",
     promptGuidelines: [
       "fffind: Never use shell find/ls/dir to locate files — use fffind with 1-2 short terms.",
       "fffind: Keep fffind queries SHORT: 1-2 terms (e.g. 'user_service'); add terms only to narrow, never as OR.",
@@ -627,6 +723,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
     description: "Use instead of shell grep/rg/find/ls because results are literal-safe, frecency-ranked, paged, and counted. Patterns are LITERAL by default — pass literal:false for regex (e.g. 'a|b', 'foo\\.bar'). Literal needs no escaping ever: pattern 'Chat ID (CHT-XXXX from list_chats or search_chats)' with path 'server.py' searches that one file literally.",
     promptSnippet: "Search file contents literally or by regex (ranked, paged, counted)",
     approval: "read",
+    loadMode: "essential",
     promptGuidelines: [
       "ffgrep: Never use shell grep/rg/select-string for code search — use ffgrep with a path filter.",
       "ffgrep: Patterns are literal by default; patterns containing |, \\., .*, or other regex syntax need literal:false.",
@@ -855,6 +952,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
     ].join("\n"),
     promptSnippet: "Semantic grep: find files and line ranges by describing what they do",
     approval: "read",
+    loadMode: "essential",
     promptGuidelines: [
       "ffjfind: MUST be the first call when you do not already know where a behavior lives — one ffjfind replaces a chain of guessed ffgrep patterns and glob sweeps; NEVER grep/glob blindly for a concept you can describe.",
       "ffjfind: Use when you can describe the behavior but not the file name — one call replaces ffgrep pattern-guessing chains.",
@@ -1460,6 +1558,7 @@ export function registerFindTools(pi: any, deps: FindToolsDeps, opts: RegisterFi
   register("fffind", "Find files", findDef("fffind"));
   register("ffgrep", "Grep content", grepDef("ffgrep"));
   register("ffjfind", "Semantic find", jfindDef("ffjfind"));
+  findToolsReady = true;
   try { register("jfind", "Semantic find", jfindDef("jfind")); } catch { /* alias where the host allows */ }
   if (typeof search.outlineFile === "function") {
     register("ffoutline", "Outline file", outlineDef("ffoutline"));
