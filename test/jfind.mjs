@@ -925,6 +925,25 @@ describe('judge: adaptHostModule awaits async hosts', () => {
   });
 });
 
+describe('judge: adaptHostModule binds the host judge method', () => {
+  it('a class-instance-style judge reading `this` resolves instead of throwing', async () => {
+    const hostJudge = {
+      label: 'bound-host',
+      judge() {
+        return {
+          answers: { k1: { noul: this.p } },
+          usage: { input: 1, output: 1, cost: { total: 0 } },
+        };
+      },
+      p: 0.9,
+    };
+    const adapted = await judge.adaptHostModule({ resolveJudge: () => hostJudge }, {});
+    assert.ok(adapted, 'host judge adapts');
+    const out = await adapted.judge({ state: {}, questions: { k1: { type: 'noul', instructions: '' } } });
+    assert.equal(out.answers.k1.noul, 0.9);
+  });
+});
+
 describe('ffjfind path "./" searches the scan root', () => {
   it('"./" and "." behave like the root; guards still reject escapes', async () => {
     const root = await fixture({ 'a.ts': targetFile(40) });

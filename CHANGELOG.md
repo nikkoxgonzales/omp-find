@@ -2,6 +2,12 @@
 
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
+
+## [0.10.1]
+
+### Fixed
+
+- `ffjfind` host-judge adapter called the extracted `judge` method unbound — class-instance host judges using `this` (e.g. `this.withCandidate`) failed every request with 'undefined is not an object'. The call is now bound to the host judge object.
 ## [0.10.0]
 
 ### Added

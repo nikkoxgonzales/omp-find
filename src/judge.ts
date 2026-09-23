@@ -423,8 +423,10 @@ function adaptHostJudge(judge: unknown): Judge | undefined {
   return {
     label,
     async judge(req: JudgeRequest, opts: { signal?: AbortSignal } = {}): Promise<JudgeResult> {
-      const res = await (judgeFn as (args: unknown, o: unknown) => Promise<unknown>)(
-        { state: req.state, questions: req.questions }, { signal: opts.signal });
+      // Bound to the host judge object: host judges are class instances whose
+      // `judge` method reads `this` (e.g. `this.withCandidate`).
+      const res = await (judgeFn as (this: unknown, args: unknown, o: unknown) => Promise<unknown>).call(
+        judge, { state: req.state, questions: req.questions }, { signal: opts.signal });
       if (res === null || typeof res !== "object" || !("answers" in res)) {
         throw new Error("judge returned an unusable result");
       }
