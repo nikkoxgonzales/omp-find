@@ -249,7 +249,7 @@ caches dropped (nothing cached)
 | `*.ext` / globs | Keep paths matching `*`, `**`, `?`, `{a,b}`, `[...]` | `*.ts !*.test.ts` |
 | `!pat` | Exclude by exact path, `dir/` prefix, path segment, or glob (`!*.test.ts`) — not a substring match | `main !dist` |
 | `git:modified` | Only files `git status --porcelain` reports (errors outside a repo) | `git:modified api` |
-| remaining words | Fuzzy subsequence match against the path | `srv usr` → `src/user.ts` |
+| remaining words | Each word is an independent fuzzy subsequence match against the path — all must match (per-term AND) | `srv usr` → `src/user_service.ts` |
 
 `ffgrep` takes the same idea through parameters instead: `pattern` (required unless resuming with `cursor`), optional `path` filter (`src/`, `*.ts`, or a bare filename like `server.py`), `literal` (default `true`), `ignoreCase`, plus `wholeWord` (no more hand-rolled `\b` regexes) and `smartCase` (no more case juggling — lowercase matches all cases, uppercase restores sensitivity).
 

@@ -65,7 +65,11 @@ export declare function parseFindQuery(q: string): ParsedFindQuery;
 /** Minimal glob → RegExp (`*`, `**`, `?`, `{a,b}`, `[...]`); reused for tool-layer path filters. */
 export declare function globToRegExp(glob: string): RegExp;
 export declare function pageOf<T>(arr: T[], limit: number | undefined, offset: number | undefined): T[];
-/** Subsequence fuzzy score (lower is better; Infinity = no match). Exact and stem basename matches win. */
+/** Subsequence fuzzy score (lower is better; Infinity = no match). Multi-term
+ * patterns are per-term AND (fzf-style): each whitespace-separated term must
+ * match as a subsequence independently, and the score is the sum — adding a
+ * term can only narrow, never remove a match the joined subsequence found.
+ * Exact and stem basename bonuses apply to the whitespace-stripped join. */
 export declare function fuzzyScore(pattern: string, target: string): number;
 /** Full ranked listing plus scan metadata (files listed + serving backend) for zero-state counts. */
 export declare function findScanned(query: string, opts?: FindOptions): Promise<FindScan>;

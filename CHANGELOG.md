@@ -3,6 +3,12 @@
 All notable changes to omp-find are documented here, Keep-a-Changelog style.
 Version pins (`package.json`, `.omp-plugin/marketplace.json`, docs) move in lockstep.
 
+## [0.10.2]
+
+### Fixed
+
+- `fffind` multi-term queries joined terms into one subsequence — `fakeplayer fake` missed `fake_players.cpp` (needs a second `f` after `player`), and adding a term could remove matches. Terms now match independently (per-term AND, score = sum); single-term scoring unchanged.
+
 ## [0.10.1]
 
 ### Fixed

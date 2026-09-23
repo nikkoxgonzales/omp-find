@@ -226,15 +226,23 @@ function applyFindFilters(files: string[], q: ParsedFindQuery, modified: Set<str
     return modified === null || modified.has(f);
   });
 }
-/** Subsequence fuzzy score (lower is better; Infinity = no match). Exact and stem basename matches win. */
+/** Subsequence fuzzy score (lower is better; Infinity = no match). Multi-term
+ * patterns are per-term AND (fzf-style): each whitespace-separated term must
+ * match as a subsequence independently, and the score is the sum — adding a
+ * term can only narrow, never remove a match the joined subsequence found.
+ * Exact and stem basename bonuses apply to the whitespace-stripped join. */
 export function fuzzyScore(pattern: string, target: string): number { // exported for table tests (test-only export, no API change)
   if (!pattern) return 0;
   const p = pattern.toLowerCase().replace(/\s+/g, ""), t = target.toLowerCase();
-  let pi = 0, score = 0, last = -1;
-  for (let ti = 0; ti < t.length && pi < p.length; ti++) {
-    if (t[ti] === p[pi]) { score += last < 0 ? ti * 2 : (ti - last - 1) * 2; last = ti; pi++; }
+  const terms = pattern.toLowerCase().split(/\s+/).filter(Boolean);
+  let score = 0;
+  for (const term of terms) {
+    let pi = 0, last = -1;
+    for (let ti = 0; ti < t.length && pi < term.length; ti++) {
+      if (t[ti] === term[pi]) { score += last < 0 ? ti * 2 : (ti - last - 1) * 2; last = ti; pi++; }
+    }
+    if (pi < term.length) return Number.POSITIVE_INFINITY;
   }
-  if (pi < p.length) return Number.POSITIVE_INFINITY;
   const base = t.slice(t.lastIndexOf("/") + 1);
   if (p === base) return score - 20; // exact basename match
   // Stem match (upstream PR #728, open): the pattern is the basename minus a

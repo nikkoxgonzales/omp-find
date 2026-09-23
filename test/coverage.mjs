@@ -1486,6 +1486,40 @@ describe('fuzzyScore tiers (exact -20, stem -10, fuzzy 0; upstream PR #728)', ()
     const fuzzy = search.fuzzyScore('mn', 'src/main.ts');
     assert.ok(exact < stem && stem < fuzzy, `exact ${exact} < stem ${stem} < fuzzy ${fuzzy}`);
   });
+
+  it('multi-term patterns are per-term AND, order-independent', () => {
+    // Regression: terms used to be joined into ONE subsequence, so
+    // 'fakeplayer fake' needed a second 'f' after 'player' and missed
+    // fake_players.cpp — adding a term could remove matches.
+    const cases = [
+      // [pattern, target, finite?]
+      ['fakeplayer fake', 'rathena/src/map/fake_players.cpp', true], // the reported miss
+      ['srv usr', 'src/user_service.ts', true], // README's own example
+      ['usr srv', 'src/user_service.ts', true], // order independence
+      ['fakeplayer zzz', 'rathena/src/map/fake_players.cpp', false], // a failing term still misses
+      ['srv usr', 'src/server.ts', false], // matches only one term: excluded
+    ];
+    for (const [pattern, target, finite] of cases) {
+      const s = search.fuzzyScore(pattern, target);
+      assert.equal(s !== Number.POSITIVE_INFINITY, finite, `${pattern} vs ${target} -> ${s}`);
+    }
+  });
+
+  it('multi-term findPaths returns files a joined subsequence missed', async () => {
+    const root = await fixture({
+      'src/map/fake_players.cpp': 'x',
+      'src/map/fake.cpp': 'x', // matches only the 'fake' term: excluded by the AND
+      'src/user_service.ts': 'x',
+    });
+    try {
+      const hits = names(await search.findPaths('fakeplayer fake', { cwd: root, scan: 'mock' })).map((h) => h.replace(/\\/g, '/'));
+      assert.deepEqual(hits, ['src/map/fake_players.cpp']);
+      const srv = names(await search.findPaths('srv usr', { cwd: root, scan: 'mock' })).map((h) => h.replace(/\\/g, '/'));
+      assert.deepEqual(srv, ['src/user_service.ts']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('walker scan honors the cooperative deadline', () => {
